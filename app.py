@@ -92,7 +92,6 @@ st.set_page_config(
 st.title("紙芝居動画ジェネレーター")
 st.caption("Markdown台本 + スライド画像 から TTS ナレーション付き MP4 動画を生成")
 
-
 # ---------------------------------------------------------------------------
 # セッションステート初期化
 # ---------------------------------------------------------------------------
@@ -200,8 +199,8 @@ if st.session_state.entries is None and st.session_state.error_message is None:
     if default_script.exists():
         try:
             st.session_state.entries = parse_script(default_script)
-        except ValueError:
-            pass  # 自動読み込み失敗は無視。ユーザーが手動で読み込む
+        except Exception as e:
+            st.session_state.error_message = f"自動読み込みエラー: {type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -233,14 +232,99 @@ with st.expander("入力設定", expanded=True):
             type=["md", "txt"],
         )
 
-    default_images_path = "input/images"
-    resolved_images = resolve_path(default_images_path)
-    images_exists_mark = "存在する" if resolved_images.exists() else "存在しない"
-    images_dir_value = st.text_input(
-        "画像フォルダパス",
-        value=default_images_path,
-        help=f"現在の解決先: {resolved_images} ({images_exists_mark})",
+    st.divider()
+    st.markdown("**画像ソース**")
+
+    image_source = st.radio(
+        "画像の取得方法",
+        ["フォルダから読み込み", "HTMLファイルから生成"],
+        horizontal=True,
     )
+
+    if image_source == "フォルダから読み込み":
+        default_images_path = "input/images"
+        resolved_images = resolve_path(default_images_path)
+        images_exists_mark = "存在する" if resolved_images.exists() else "存在しない"
+        images_dir_value = st.text_input(
+            "画像フォルダパス",
+            value=default_images_path,
+            help=f"現在の解決先: {resolved_images} ({images_exists_mark})",
+        )
+    else:
+        # HTML -> 画像変換モード
+        html_file_path = st.text_input(
+            "HTMLファイルパス",
+            value="",
+            help="Claude Artifact等のHTMLファイルのパスを入力",
+        )
+        col_slides, col_key, col_wait = st.columns(3)
+        with col_slides:
+            html_num_slides = st.number_input(
+                "スライド数",
+                min_value=1,
+                max_value=100,
+                value=14,
+                step=1,
+            )
+        with col_key:
+            html_nav_key = st.selectbox(
+                "遷移キー",
+                ["ArrowRight", "ArrowLeft", "ArrowDown", "Space", "Enter"],
+                index=0,
+            )
+        with col_wait:
+            html_wait_time = st.number_input(
+                "待機時間（秒）",
+                min_value=0.5,
+                max_value=10.0,
+                value=2.0,
+                step=0.5,
+            )
+
+        images_dir_value = "input/images"
+
+        if st.button("スクリーンショット実行", type="secondary"):
+            if not html_file_path:
+                st.error("HTMLファイルのパスを入力してください。")
+            else:
+                resolved_html = resolve_path(html_file_path)
+                if not resolved_html.exists():
+                    st.error(f"HTMLファイルが見つかりません: {resolved_html}")
+                else:
+                    try:
+                        from html_to_images import capture_slides
+
+                        output_path = resolve_path(images_dir_value)
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        def _update_progress(
+                            current: int, total: int, path: Path
+                        ) -> None:
+                            progress_bar.progress(current / total)
+                            status_text.text(
+                                f"スライド {current}/{total}: {path.name}"
+                            )
+
+                        with st.spinner("HTMLからスクリーンショットを撮影中..."):
+                            paths = capture_slides(
+                                html_path=str(resolved_html),
+                                output_dir=str(output_path),
+                                num_slides=int(html_num_slides),
+                                nav_key=html_nav_key,
+                                wait=float(html_wait_time),
+                            )
+                        progress_bar.progress(1.0)
+                        st.success(
+                            f"{len(paths)}枚のスクリーンショットを"
+                            f" {output_path} に保存しました"
+                        )
+                    except FileNotFoundError as e:
+                        st.error(str(e))
+                    except RuntimeError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"スクリーンショット撮影エラー: {e}")
 
     # エラーメッセージ表示（リラン後も session_state から復元して表示）
     if st.session_state.error_message:

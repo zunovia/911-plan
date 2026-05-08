@@ -71,6 +71,19 @@ if errorlevel 1 (
 echo [OK] パッケージのインストールが完了しました
 echo.
 
+REM Playwrightブラウザエンジンのインストール
+echo [実行中] ブラウザエンジンをインストールしています...
+.venv\Scripts\python.exe -m playwright install chromium
+if errorlevel 1 (
+    echo [警告] ブラウザエンジンのインストールに失敗しました。
+    echo   HTML→画像変換機能を使用する場合は、手動で以下を実行してください:
+    echo   .venv\Scripts\python.exe -m playwright install chromium
+    echo.
+) else (
+    echo [OK] ブラウザエンジンのインストールが完了しました
+)
+echo.
+
 REM config.json のコピー
 if exist config.json (
     echo [スキップ] config.json は既に存在します
