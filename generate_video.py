@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -123,9 +124,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # ### スライドN：タイトル
-_SLIDE_HEADER_RE = re.compile(
-    r"^###\s+スライド(\d+)[：:]\s*(.+)$", re.MULTILINE
-)
+_SLIDE_HEADER_RE = re.compile(r"^###\s+スライド(\d+)[：:]\s*(.+)$", re.MULTILINE)
 # 「テキスト」内のセリフ抽出
 _SERIF_TEXT_RE = re.compile(r"「(.+?)」", re.DOTALL)
 
@@ -152,7 +151,9 @@ def parse_script(script_path: Path) -> list[SlideEntry]:
 
         # このスライドのセクション本文を取得
         start = match.end()
-        end = headers[i + 1].start() if i + 1 < len(headers) else len(kamishibai_section)
+        end = (
+            headers[i + 1].start() if i + 1 < len(headers) else len(kamishibai_section)
+        )
         section_body = kamishibai_section[start:end]
 
         # セリフ行を探す
@@ -161,19 +162,23 @@ def parse_script(script_path: Path) -> list[SlideEntry]:
             text = serif_match.group(1).strip()
             # 括弧内の演出指示を除去（例: 「（3秒の間の後）あなたの...」）
             text = re.sub(r"（[^）]*）", "", text).strip()
-            entries.append(SlideEntry(
-                number=slide_num,
-                title=slide_title,
-                text=text,
-                is_silent=False,
-            ))
+            entries.append(
+                SlideEntry(
+                    number=slide_num,
+                    title=slide_title,
+                    text=text,
+                    is_silent=False,
+                )
+            )
         else:
-            entries.append(SlideEntry(
-                number=slide_num,
-                title=slide_title,
-                text="",
-                is_silent=True,
-            ))
+            entries.append(
+                SlideEntry(
+                    number=slide_num,
+                    title=slide_title,
+                    text="",
+                    is_silent=True,
+                )
+            )
 
     return entries
 
@@ -251,8 +256,7 @@ def get_tts_provider(provider_name: str) -> TTSProvider:
     if cls is None:
         available = ", ".join(sorted(_TTS_PROVIDERS.keys()))
         raise ValueError(
-            f"未対応のTTSプロバイダー: '{provider_name}'\n"
-            f"  利用可能: {available}"
+            f"未対応のTTSプロバイダー: '{provider_name}'\n  利用可能: {available}"
         )
     return cls()
 
@@ -266,11 +270,16 @@ def _run_ffmpeg(args: list[str], description: str) -> None:
     """FFmpegコマンドを実行する. 失敗時は明確なエラーを出す."""
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", *args]
     log.debug("実行: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        log.error(
+            "ffmpeg が見つかりません。FFmpegをインストールしてPATHに追加してください。"
+        )
+        sys.exit(1)
     if result.returncode != 0:
         log.error(
-            "%s に失敗しました (exit code %d)\n"
-            "stderr: %s",
+            "%s に失敗しました (exit code %d)\nstderr: %s",
             description,
             result.returncode,
             result.stderr,
@@ -283,11 +292,16 @@ def generate_silence(output_path: Path, duration: float) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg(
         [
-            "-f", "lavfi",
-            "-i", "anullsrc=r=44100:cl=stereo",
-            "-t", str(duration),
-            "-c:a", "libmp3lame",
-            "-q:a", "4",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=stereo",
+            "-t",
+            str(duration),
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "4",
             str(output_path),
         ],
         f"無音生成 ({duration}s)",
@@ -299,16 +313,17 @@ def get_audio_duration(audio_path: Path) -> float:
     """ffprobeで音声ファイルの長さ（秒）を取得する."""
     cmd = [
         "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
         str(audio_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"ffprobe failed for {audio_path}: {result.stderr}"
-        )
+        raise RuntimeError(f"ffprobe failed for {audio_path}: {result.stderr}")
     return float(result.stdout.strip())
 
 
@@ -326,23 +341,35 @@ def create_scene(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg(
         [
-            "-loop", "1",
-            "-i", str(image_path),
-            "-i", str(audio_path),
-            "-t", f"{total_duration:.3f}",
-            "-vf", (
+            "-loop",
+            "1",
+            "-i",
+            str(image_path),
+            "-i",
+            str(audio_path),
+            "-t",
+            f"{total_duration:.3f}",
+            "-vf",
+            (
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
                 "format=yuv420p"
             ),
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-af", f"adelay={int(config.padding_before * 1000)}|{int(config.padding_before * 1000)},apad",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-af",
+            f"adelay={int(config.padding_before * 1000)}|{int(config.padding_before * 1000)},apad",
             "-shortest",
-            "-r", str(config.fps),
+            "-r",
+            str(config.fps),
             str(output_path),
         ],
         f"シーン生成 ({output_path.name})",
@@ -366,10 +393,14 @@ def concatenate_scenes(scene_paths: list[Path], output_path: Path) -> None:
     try:
         _run_ffmpeg(
             [
-                "-f", "concat",
-                "-safe", "0",
-                "-i", concat_list,
-                "-c", "copy",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_list,
+                "-c",
+                "copy",
                 str(output_path),
             ],
             "シーン結合",
@@ -384,8 +415,7 @@ def mix_bgm(video_path: Path, config: Config) -> Path:
     BGMは動画の長さに合わせてループし、指定音量で合成する。
     元の動画を _no_bgm サフィックス付きで退避し、同じパスにBGM付き動画を出力する。
     """
-    bgm_file = config.output_dir / ".." / config.bgm.file
-    # config.jsonからの相対パスで解決
+    # config.jsonのあるディレクトリからの相対パスで解決
     bgm_file = (config.output_dir.parent / config.bgm.file).resolve()
     if not bgm_file.exists():
         log.warning("BGMファイルが見つかりません: %s (BGMなしで続行)", bgm_file)
@@ -397,27 +427,36 @@ def mix_bgm(video_path: Path, config: Config) -> Path:
     output_path = video_path.with_stem(video_path.stem + "_with_bgm")
     _run_ffmpeg(
         [
-            "-i", str(video_path),
-            "-stream_loop", "-1",
-            "-i", str(bgm_file),
-            "-t", f"{video_duration:.3f}",
+            "-i",
+            str(video_path),
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(bgm_file),
+            "-t",
+            f"{video_duration:.3f}",
             "-filter_complex",
             (
-                f"[1:a]volume={config.bgm.volume},afade=t=out:st={video_duration - 2:.3f}:d=2[bgm];"
+                f"[1:a]volume={config.bgm.volume},"
+                f"afade=t=out:st={max(0.0, video_duration - 2):.3f}:d=2[bgm];"
                 "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
             ),
-            "-map", "0:v",
-            "-map", "[aout]",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "192k",
+            "-map",
+            "0:v",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
             str(output_path),
         ],
         "BGM合成",
     )
 
     # BGM付き動画を元のパスに置き換え
-    import shutil
     backup_path = video_path.with_stem(video_path.stem + "_no_bgm")
     shutil.move(str(video_path), str(backup_path))
     shutil.move(str(output_path), str(video_path))
@@ -493,7 +532,9 @@ def process_slides(
                 entry.number,
                 status,
                 entry.title,
-                entry.text[:50] + "..." if len(entry.text) > 50 else entry.text or "(silence)",
+                entry.text[:50] + "..."
+                if len(entry.text) > 50
+                else entry.text or "(silence)",
             )
         return None
 
@@ -502,7 +543,10 @@ def process_slides(
     for idx, entry in enumerate(entries, 1):
         log.info(
             "スライド %d/%d 処理中 (スライド%d: %s)...",
-            idx, total, entry.number, entry.title,
+            idx,
+            total,
+            entry.number,
+            entry.title,
         )
 
         # 画像解決
@@ -522,13 +566,14 @@ def process_slides(
         log.info(
             "  シーン完了: %s (%.1fs)",
             scene_path.name,
-            get_audio_duration(audio_path) + config.padding_before + config.padding_after,
+            get_audio_duration(audio_path)
+            + config.padding_before
+            + config.padding_after,
         )
 
     # 結合
     if len(scene_paths) == 1:
         final_path = config.output_dir / f"slide_{entries[0].number:02d}.mp4"
-        import shutil
         shutil.copy2(scene_paths[0], final_path)
     else:
         final_path = config.output_dir / "final.mp4"
@@ -601,12 +646,16 @@ def main() -> None:
     # FFmpeg存在チェック (dry-run以外)
     if not args.dry_run:
         for tool in ("ffmpeg", "ffprobe"):
-            result = subprocess.run(
-                [tool, "-version"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
+            try:
+                result = subprocess.run(
+                    [tool, "-version"],
+                    capture_output=True,
+                    text=True,
+                )
+                tool_missing = result.returncode != 0
+            except FileNotFoundError:
+                tool_missing = True
+            if tool_missing:
                 log.error(
                     "%s が見つかりません。FFmpegをインストールしてPATHに追加してください。",
                     tool,
