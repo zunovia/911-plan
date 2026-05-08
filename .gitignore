@@ -18,6 +18,9 @@ input/images/*.jpeg
 *.json
 !config.example.json
 
+# API key
+.api_key
+
 # Python
 __pycache__/
 *.py[cod]

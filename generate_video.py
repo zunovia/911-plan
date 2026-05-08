@@ -217,7 +217,17 @@ class GoogleCloudTTS(TTSProvider):
             )
             sys.exit(1)
 
-        client = texttospeech.TextToSpeechClient()
+        # APIキーファイルが存在する場合はAPIキー認証を使用する
+        api_key_path = Path(__file__).resolve().parent / ".api_key"
+        if api_key_path.exists():
+            api_key = api_key_path.read_text(encoding="utf-8").strip()
+            from google.api_core.client_options import ClientOptions
+            client = texttospeech.TextToSpeechClient(
+                client_options=ClientOptions(api_key=api_key)
+            )
+        else:
+            # フォールバック: GOOGLE_APPLICATION_CREDENTIALS 環境変数
+            client = texttospeech.TextToSpeechClient()
 
         synthesis_input = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
