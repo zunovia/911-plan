@@ -8,7 +8,9 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -28,6 +30,14 @@ from generate_video import (
 # ---------------------------------------------------------------------------
 
 APP_DIR = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# Google Cloud TTS 認証キーの自動検出（起動時）
+# ---------------------------------------------------------------------------
+
+_gcp_key_path = APP_DIR / "gcp-key.json"
+if _gcp_key_path.exists():
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_gcp_key_path)
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +390,59 @@ with st.expander("TTS設定"):
     provider_key = "google" if tts_provider == "Google Cloud TTS" else "voicevox"
 
     if provider_key == "google":
+        # 認証状態表示
+        gcp_key_path = APP_DIR / "gcp-key.json"
+        if gcp_key_path.exists():
+            st.success("認証キーが保存されています（gcp-key.json）")
+        else:
+            st.warning("Google Cloud認証キーが未設定です。下記から設定してください。")
+
+        # 認証キー入力フォーム
+        with st.container(border=True):
+            st.caption("サービスアカウントキーの設定")
+            key_input_method = st.radio(
+                "入力方法",
+                ["JSONを貼り付け", "ファイルアップロード"],
+                horizontal=True,
+                key="gcp_key_method",
+            )
+
+            gcp_json_content = None
+            if key_input_method == "JSONを貼り付け":
+                gcp_json_text = st.text_area(
+                    "サービスアカウントキー (JSON)",
+                    height=150,
+                    placeholder='{"type": "service_account", "project_id": "...", ...}',
+                    key="gcp_json_text",
+                )
+                if gcp_json_text:
+                    gcp_json_content = gcp_json_text
+            else:
+                gcp_json_file = st.file_uploader(
+                    "JSONファイル (.json)",
+                    type=["json"],
+                    key="gcp_json_file",
+                )
+                if gcp_json_file is not None:
+                    gcp_json_content = gcp_json_file.read().decode("utf-8")
+
+            if st.button("認証キーを保存", key="save_gcp_key"):
+                if gcp_json_content:
+                    try:
+                        parsed = json.loads(gcp_json_content)
+                        if parsed.get("type") != "service_account":
+                            st.error("サービスアカウントのJSONではありません。")
+                        else:
+                            gcp_key_path.write_text(gcp_json_content, encoding="utf-8")
+                            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(gcp_key_path)
+                            st.success("認証キーを保存しました！")
+                            st.rerun()
+                    except json.JSONDecodeError:
+                        st.error("JSONの構文が正しくありません。")
+                else:
+                    st.error("認証キーを入力してください。")
+
+        # 音声選択
         tts_voice = st.selectbox("音声", GOOGLE_VOICES, index=1)
     else:
         tts_voice = "voicevox"  # VOICEVOXでは使わないがConfigに必要
