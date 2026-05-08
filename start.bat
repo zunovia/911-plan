@@ -15,13 +15,14 @@ if not exist .venv (
     exit /b 1
 )
 
-REM 仮想環境を有効化してアプリを起動
-call .venv\Scripts\activate
-echo [OK] 仮想環境を有効化しました
+REM アプリを起動
+echo [OK] 仮想環境を検出しました
 echo.
 echo   ブラウザが自動で開きます。
 echo   開かない場合は http://localhost:8501 にアクセスしてください。
 echo.
 echo   終了するには このウィンドウを閉じるか Ctrl+C を押してください。
 echo.
-streamlit run app.py
+.venv\Scripts\python.exe -m streamlit run app.py
+pause
+
