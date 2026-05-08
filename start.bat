@@ -15,6 +15,12 @@ if not exist .venv (
     exit /b 1
 )
 
+REM Google Cloud TTS認証（サービスアカウントキーがある場合）
+if exist gcp-key.json (
+    set GOOGLE_APPLICATION_CREDENTIALS=%~dp0gcp-key.json
+    echo [OK] Google Cloud認証キーを検出しました
+)
+
 REM アプリを起動
 echo [OK] 仮想環境を検出しました
 echo.
@@ -25,4 +31,5 @@ echo   終了するには このウィンドウを閉じるか Ctrl+C を押し�
 echo.
 .venv\Scripts\python.exe -m streamlit run app.py
 pause
+
 
