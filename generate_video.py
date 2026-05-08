@@ -2,7 +2,7 @@
 """
 紙芝居動画自動生成ツール
 
-Markdown台本 + スライド画像 → Google Cloud TTS + FFmpeg → ナレーション付きMP4動画
+Markdown台本 + スライド画像 → TTS + FFmpeg → ナレーション付きMP4動画
 
 Usage:
     python generate_video.py --config config.json
@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import abc
 import argparse
 import json
 import logging
@@ -38,10 +39,20 @@ class SlideEntry:
 
 
 @dataclass
+class BGMConfig:
+    """BGM合成の設定."""
+
+    enabled: bool = False
+    file: str = ""
+    volume: float = 0.15
+
+
+@dataclass
 class Config:
     """設定ファイルの内容."""
 
     # TTS
+    tts_provider: str
     tts_language: str
     tts_voice: str
     tts_speaking_rate: float
@@ -52,6 +63,10 @@ class Config:
     silence_duration: float
     padding_before: float
     padding_after: float
+    transition: str
+    transition_duration: float
+    # BGM
+    bgm: BGMConfig
     # Paths
     images_dir: Path
     script_file: Path
@@ -64,10 +79,12 @@ class Config:
 
         tts = data.get("tts", {})
         video = data.get("video", {})
+        bgm_data = data.get("bgm", {})
         paths = data.get("paths", {})
         base_dir = path.parent
 
         return cls(
+            tts_provider=tts.get("provider", "google"),
             tts_language=tts.get("language", "ja-JP"),
             tts_voice=tts.get("voice", "ja-JP-Neural2-C"),
             tts_speaking_rate=tts.get("speaking_rate", 0.9),
@@ -77,6 +94,13 @@ class Config:
             silence_duration=video.get("silence_duration", 3.5),
             padding_before=video.get("padding_before", 0.5),
             padding_after=video.get("padding_after", 0.5),
+            transition=video.get("transition", "none"),
+            transition_duration=video.get("transition_duration", 0.5),
+            bgm=BGMConfig(
+                enabled=bgm_data.get("enabled", False),
+                file=bgm_data.get("file", ""),
+                volume=bgm_data.get("volume", 0.15),
+            ),
             images_dir=base_dir / paths.get("images_dir", "input/images"),
             script_file=base_dir / paths.get("script_file", "input/script.md"),
             output_dir=base_dir / paths.get("output_dir", "output"),
@@ -155,47 +179,82 @@ def parse_script(script_path: Path) -> list[SlideEntry]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Google Cloud TTS
+# 2. TTS プロバイダー
 # ---------------------------------------------------------------------------
 
 
-def synthesize_speech(
-    text: str,
-    output_path: Path,
-    config: Config,
-) -> None:
-    """Google Cloud TTSでテキストを音声合成し、MP3ファイルとして保存する."""
-    try:
-        from google.cloud import texttospeech
-    except ImportError:
-        log.error(
-            "google-cloud-texttospeech がインストールされていません。\n"
-            "  pip install google-cloud-texttospeech"
+class TTSProvider(abc.ABC):
+    """TTS プロバイダーの基底クラス.
+
+    新しいプロバイダーを追加するには:
+    1. このクラスを継承した具象クラスを作成
+    2. synthesize() メソッドを実装
+    3. _TTS_PROVIDERS 辞書にプロバイダー名とクラスを登録
+    """
+
+    @abc.abstractmethod
+    def synthesize(self, text: str, output_path: Path, config: Config) -> None:
+        """テキストを音声合成し、MP3ファイルとして保存する."""
+
+
+class GoogleCloudTTS(TTSProvider):
+    """Google Cloud TTS の実装."""
+
+    def synthesize(self, text: str, output_path: Path, config: Config) -> None:
+        try:
+            from google.cloud import texttospeech
+        except ImportError:
+            log.error(
+                "google-cloud-texttospeech がインストールされていません。\n"
+                "  pip install google-cloud-texttospeech"
+            )
+            sys.exit(1)
+
+        client = texttospeech.TextToSpeechClient()
+
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=config.tts_language,
+            name=config.tts_voice,
         )
-        sys.exit(1)
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+            speaking_rate=config.tts_speaking_rate,
+            pitch=config.tts_pitch,
+        )
 
-    client = texttospeech.TextToSpeechClient()
+        response = client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config,
+        )
 
-    synthesis_input = texttospeech.SynthesisInput(text=text)
-    voice = texttospeech.VoiceSelectionParams(
-        language_code=config.tts_language,
-        name=config.tts_voice,
-    )
-    audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3,
-        speaking_rate=config.tts_speaking_rate,
-        pitch=config.tts_pitch,
-    )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(response.audio_content)
+        log.info("  TTS出力: %s", output_path.name)
 
-    response = client.synthesize_speech(
-        input=synthesis_input,
-        voice=voice,
-        audio_config=audio_config,
-    )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(response.audio_content)
-    log.info("  TTS出力: %s", output_path.name)
+# 将来のプロバイダーはここに追加:
+# class VoicevoxTTS(TTSProvider): ...
+# class OpenAITTS(TTSProvider): ...
+# class ElevenLabsTTS(TTSProvider): ...
+
+# プロバイダー名 → クラスのマッピング
+_TTS_PROVIDERS: dict[str, type[TTSProvider]] = {
+    "google": GoogleCloudTTS,
+}
+
+
+def get_tts_provider(provider_name: str) -> TTSProvider:
+    """設定のプロバイダー名からTTSProviderインスタンスを返す."""
+    cls = _TTS_PROVIDERS.get(provider_name)
+    if cls is None:
+        available = ", ".join(sorted(_TTS_PROVIDERS.keys()))
+        raise ValueError(
+            f"未対応のTTSプロバイダー: '{provider_name}'\n"
+            f"  利用可能: {available}"
+        )
+    return cls()
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +378,53 @@ def concatenate_scenes(scene_paths: list[Path], output_path: Path) -> None:
         Path(concat_list).unlink(missing_ok=True)
 
 
+def mix_bgm(video_path: Path, config: Config) -> Path:
+    """最終動画にBGMをミックスする.
+
+    BGMは動画の長さに合わせてループし、指定音量で合成する。
+    元の動画を _no_bgm サフィックス付きで退避し、同じパスにBGM付き動画を出力する。
+    """
+    bgm_file = config.output_dir / ".." / config.bgm.file
+    # config.jsonからの相対パスで解決
+    bgm_file = (config.output_dir.parent / config.bgm.file).resolve()
+    if not bgm_file.exists():
+        log.warning("BGMファイルが見つかりません: %s (BGMなしで続行)", bgm_file)
+        return video_path
+
+    video_duration = get_audio_duration(video_path)
+    log.info("BGM合成中 (%.1fs, volume=%.2f)...", video_duration, config.bgm.volume)
+
+    output_path = video_path.with_stem(video_path.stem + "_with_bgm")
+    _run_ffmpeg(
+        [
+            "-i", str(video_path),
+            "-stream_loop", "-1",
+            "-i", str(bgm_file),
+            "-t", f"{video_duration:.3f}",
+            "-filter_complex",
+            (
+                f"[1:a]volume={config.bgm.volume},afade=t=out:st={video_duration - 2:.3f}:d=2[bgm];"
+                "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            ),
+            "-map", "0:v",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            str(output_path),
+        ],
+        "BGM合成",
+    )
+
+    # BGM付き動画を元のパスに置き換え
+    import shutil
+    backup_path = video_path.with_stem(video_path.stem + "_no_bgm")
+    shutil.move(str(video_path), str(backup_path))
+    shutil.move(str(output_path), str(video_path))
+    log.info("  BGM合成完了 (バックアップ: %s)", backup_path.name)
+    return video_path
+
+
 # ---------------------------------------------------------------------------
 # 4. 画像ファイル解決
 # ---------------------------------------------------------------------------
@@ -365,6 +471,9 @@ def process_slides(
     audio_dir.mkdir(parents=True, exist_ok=True)
     scenes_dir.mkdir(parents=True, exist_ok=True)
 
+    # TTSプロバイダーを初期化
+    tts = get_tts_provider(config.tts_provider)
+
     # フィルタリング
     if target_slide is not None:
         entries = [e for e in entries if e.number == target_slide]
@@ -404,7 +513,7 @@ def process_slides(
         if entry.is_silent:
             generate_silence(audio_path, config.silence_duration)
         else:
-            synthesize_speech(entry.text, audio_path, config)
+            tts.synthesize(entry.text, audio_path, config)
 
         # シーン生成
         scene_path = scenes_dir / f"scene_{entry.number:02d}.mp4"
@@ -425,6 +534,10 @@ def process_slides(
         final_path = config.output_dir / "final.mp4"
         log.info("シーン結合中...")
         concatenate_scenes(scene_paths, final_path)
+
+    # BGM合成（有効な場合）
+    if config.bgm.enabled and config.bgm.file:
+        final_path = mix_bgm(final_path, config)
 
     log.info("完了: %s", final_path)
     return final_path

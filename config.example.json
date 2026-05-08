@@ -1,5 +1,6 @@
 {
   "tts": {
+    "provider": "google",
     "language": "ja-JP",
     "voice": "ja-JP-Neural2-C",
     "speaking_rate": 0.9,
@@ -10,7 +11,14 @@
     "fps": 30,
     "silence_duration": 3.5,
     "padding_before": 0.5,
-    "padding_after": 0.5
+    "padding_after": 0.5,
+    "transition": "none",
+    "transition_duration": 0.5
+  },
+  "bgm": {
+    "enabled": false,
+    "file": "",
+    "volume": 0.15
   },
   "paths": {
     "images_dir": "input/images",
