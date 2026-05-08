@@ -1,0 +1,20 @@
+{
+  "tts": {
+    "language": "ja-JP",
+    "voice": "ja-JP-Neural2-C",
+    "speaking_rate": 0.9,
+    "pitch": 0.0
+  },
+  "video": {
+    "resolution": [1920, 1080],
+    "fps": 30,
+    "silence_duration": 3.5,
+    "padding_before": 0.5,
+    "padding_after": 0.5
+  },
+  "paths": {
+    "images_dir": "input/images",
+    "script_file": "input/script.md",
+    "output_dir": "output"
+  }
+}

@@ -1,0 +1,43 @@
+# Output files
+output/audio/
+output/scenes/
+output/*.mp4
+
+# Input images (user-provided)
+input/images/*.png
+input/images/*.jpg
+input/images/*.jpeg
+
+# Media files
+*.mp3
+*.wav
+*.mp4
+*.avi
+
+# Google Cloud service account key
+*.json
+!config.example.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
