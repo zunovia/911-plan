@@ -58,6 +58,7 @@ class Config:
     tts_voice: str
     tts_speaking_rate: float
     tts_pitch: float
+    tts_options: dict
     # Video
     resolution: tuple[int, int]
     fps: int
@@ -90,6 +91,7 @@ class Config:
             tts_voice=tts.get("voice", "ja-JP-Neural2-C"),
             tts_speaking_rate=tts.get("speaking_rate", 0.9),
             tts_pitch=tts.get("pitch", 0.0),
+            tts_options=tts.get("options", {}),
             resolution=tuple(video.get("resolution", [1920, 1080])),
             fps=video.get("fps", 30),
             silence_duration=video.get("silence_duration", 3.5),
@@ -239,14 +241,94 @@ class GoogleCloudTTS(TTSProvider):
         log.info("  TTS出力: %s", output_path.name)
 
 
+class VoicevoxTTS(TTSProvider):
+    """VOICEVOX ローカルエンジンの実装.
+
+    VOICEVOXエンジン（http://localhost:50021）にHTTPリクエストを送信して音声合成する。
+    事前にVOICEVOXを起動しておく必要がある。
+
+    config.tts_options で以下を指定可能:
+      - base_url: エンジンのURL（デフォルト: http://localhost:50021）
+      - speaker: 話者ID（デフォルト: 1 = ずんだもん）
+    """
+
+    def synthesize(self, text: str, output_path: Path, config: Config) -> None:
+        import urllib.parse
+        import urllib.request
+
+        base_url = config.tts_options.get("base_url", "http://localhost:50021")
+        speaker = config.tts_options.get("speaker", 1)
+
+        # 1. audio_query: テキストからクエリJSONを取得
+        query_url = (
+            f"{base_url}/audio_query"
+            f"?text={urllib.parse.quote(text)}&speaker={speaker}"
+        )
+        req = urllib.request.Request(query_url, method="POST")
+        try:
+            with urllib.request.urlopen(req) as resp:
+                query_json = resp.read()
+        except Exception as e:
+            log.error(
+                "VOICEVOX audio_query に失敗しました。\n"
+                "  VOICEVOXが起動していることを確認してください。\n"
+                "  URL: %s\n  エラー: %s",
+                base_url,
+                e,
+            )
+            raise RuntimeError(f"VOICEVOX audio_query failed: {e}") from e
+
+        # speaking_rate / pitch の適用
+        query = json.loads(query_json)
+        query["speedScale"] = config.tts_speaking_rate
+        query["pitchScale"] = config.tts_pitch
+        query_json = json.dumps(query).encode()
+
+        # 2. synthesis: クエリJSONから音声WAVを取得
+        synth_url = f"{base_url}/synthesis?speaker={speaker}"
+        req = urllib.request.Request(
+            synth_url,
+            data=query_json,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                wav_data = resp.read()
+        except Exception as e:
+            log.error("VOICEVOX synthesis に失敗しました: %s", e)
+            raise RuntimeError(f"VOICEVOX synthesis failed: {e}") from e
+
+        # 3. WAV → MP3 変換（FFmpeg）
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        wav_path = output_path.with_suffix(".wav")
+        wav_path.write_bytes(wav_data)
+        try:
+            _run_ffmpeg(
+                [
+                    "-i",
+                    str(wav_path),
+                    "-c:a",
+                    "libmp3lame",
+                    "-q:a",
+                    "4",
+                    str(output_path),
+                ],
+                "VOICEVOX WAV→MP3変換",
+            )
+        finally:
+            wav_path.unlink(missing_ok=True)
+        log.info("  TTS出力 (VOICEVOX): %s", output_path.name)
+
+
 # 将来のプロバイダーはここに追加:
-# class VoicevoxTTS(TTSProvider): ...
 # class OpenAITTS(TTSProvider): ...
 # class ElevenLabsTTS(TTSProvider): ...
 
 # プロバイダー名 → クラスのマッピング
 _TTS_PROVIDERS: dict[str, type[TTSProvider]] = {
     "google": GoogleCloudTTS,
+    "voicevox": VoicevoxTTS,
 }
 
 
@@ -407,6 +489,141 @@ def concatenate_scenes(scene_paths: list[Path], output_path: Path) -> None:
         )
     finally:
         Path(concat_list).unlink(missing_ok=True)
+
+
+def get_video_duration(video_path: Path) -> float:
+    """ffprobeで動画ファイルの長さ（秒）を取得する."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {video_path}: {result.stderr}")
+    return float(result.stdout.strip())
+
+
+def concatenate_scenes_with_transition(
+    scene_paths: list[Path],
+    output_path: Path,
+    config: Config,
+) -> None:
+    """トランジション付きで複数のシーンMP4を結合する.
+
+    config.transition が "none" または シーンが1つ以下の場合は
+    通常の concat demuxer にフォールバックする。
+
+    対応トランジション:
+      - "crossfade": スライド間でクロスフェード（xfade transition=fade）
+      - "fade_black": フェードアウト→黒→フェードイン（xfade transition=fadeblack）
+    """
+    if config.transition == "none" or len(scene_paths) < 2:
+        concatenate_scenes(scene_paths, output_path)
+        return
+
+    # xfadeトランジション名のマッピング
+    xfade_map = {
+        "crossfade": "fade",
+        "fade_black": "fadeblack",
+    }
+    xfade_name = xfade_map.get(config.transition)
+    if xfade_name is None:
+        log.warning(
+            "未対応のトランジション '%s'。カット結合にフォールバックします。",
+            config.transition,
+        )
+        concatenate_scenes(scene_paths, output_path)
+        return
+
+    duration = config.transition_duration
+
+    # 各シーンの長さを取得
+    durations = [get_video_duration(p) for p in scene_paths]
+
+    # xfadeフィルターチェーンと音声acrossfadeチェーンを構築
+    # 入力: [0], [1], [2], ...
+    # ビデオ: [0][1]xfade=...offset=X[v0]; [v0][2]xfade=...offset=Y[v1]; ...
+    # オーディオ: [0:a][1:a]acrossfade=d=D[a0]; [a0][2:a]acrossfade=d=D[a1]; ...
+    inputs: list[str] = []
+    for p in scene_paths:
+        inputs.extend(["-i", str(p)])
+
+    video_filters: list[str] = []
+    audio_filters: list[str] = []
+
+    # 累積offset: 各xfadeの開始位置は「前のシーンの終了時刻 - transition_duration」
+    cumulative_duration = durations[0]
+
+    for i in range(1, len(scene_paths)):
+        offset = max(0.0, cumulative_duration - duration)
+
+        # ビデオフィルター
+        if i == 1:
+            v_in = "[0:v][1:v]"
+        else:
+            v_in = f"[v{i - 2}][{i}:v]"
+
+        if i == len(scene_paths) - 1:
+            v_out = "[vout]"
+        else:
+            v_out = f"[v{i - 1}]"
+
+        video_filters.append(
+            f"{v_in}xfade=transition={xfade_name}"
+            f":duration={duration:.3f}:offset={offset:.3f}{v_out}"
+        )
+
+        # オーディオフィルター
+        if i == 1:
+            a_in = "[0:a][1:a]"
+        else:
+            a_in = f"[a{i - 2}][{i}:a]"
+
+        if i == len(scene_paths) - 1:
+            a_out = "[aout]"
+        else:
+            a_out = f"[a{i - 1}]"
+
+        audio_filters.append(
+            f"{a_in}acrossfade=d={duration:.3f}:c1=tri:c2=tri{a_out}"
+        )
+
+        # 次のoffset計算のため、トランジション重なり分を引く
+        cumulative_duration = offset + durations[i]
+
+    filter_complex = ";".join(video_filters + audio_filters)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(
+        [
+            *inputs,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            str(output_path),
+        ],
+        f"トランジション結合 ({config.transition})",
+    )
+    log.info("  トランジション結合完了: %s (%s)", output_path.name, config.transition)
 
 
 def mix_bgm(video_path: Path, config: Config) -> Path:
@@ -578,7 +795,7 @@ def process_slides(
     else:
         final_path = config.output_dir / "final.mp4"
         log.info("シーン結合中...")
-        concatenate_scenes(scene_paths, final_path)
+        concatenate_scenes_with_transition(scene_paths, final_path, config)
 
     # BGM合成（有効な場合）
     if config.bgm.enabled and config.bgm.file:
