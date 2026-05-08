@@ -24,6 +24,13 @@ from generate_video import (
 )
 
 # ---------------------------------------------------------------------------
+# アプリのベースディレクトリ（app.py の場所に固定）
+# ---------------------------------------------------------------------------
+
+APP_DIR = Path(__file__).resolve().parent
+
+
+# ---------------------------------------------------------------------------
 # ログキャプチャ用ハンドラ
 # ---------------------------------------------------------------------------
 
@@ -96,6 +103,8 @@ if "generated_video" not in st.session_state:
     st.session_state.generated_video = None
 if "log_messages" not in st.session_state:
     st.session_state.log_messages = []
+if "error_message" not in st.session_state:
+    st.session_state.error_message = None
 
 
 # ---------------------------------------------------------------------------
@@ -103,17 +112,23 @@ if "log_messages" not in st.session_state:
 # ---------------------------------------------------------------------------
 
 
+def resolve_path(user_path: str) -> Path:
+    """ユーザー入力パスを解決する。絶対パスならそのまま、相対パスならAPP_DIR基準。"""
+    p = Path(user_path)
+    if p.is_absolute():
+        return p
+    return APP_DIR / p
+
+
 def load_script_from_path(script_path: str) -> list[SlideEntry] | None:
-    """パス文字列から台本を読み込む."""
-    p = Path(script_path)
+    """パス文字列から台本を読み込む。エラー時は None を返す（エラーは呼び出し元が session_state に保存）。"""
+    p = resolve_path(script_path)
     if not p.exists():
-        st.error(f"台本ファイルが見つかりません: {p}")
         return None
     try:
         return parse_script(p)
     except ValueError as e:
-        st.error(f"台本パースエラー: {e}")
-        return None
+        raise ValueError(f"台本パースエラー: {e}") from e
 
 
 def load_script_from_upload(uploaded_file) -> list[SlideEntry] | None:
@@ -128,8 +143,7 @@ def load_script_from_upload(uploaded_file) -> list[SlideEntry] | None:
     try:
         return parse_script(tmp_path)
     except ValueError as e:
-        st.error(f"台本パースエラー: {e}")
-        return None
+        raise ValueError(f"台本パースエラー: {e}") from e
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -171,10 +185,23 @@ def build_config(
             file=bgm_file,
             volume=bgm_volume,
         ),
-        images_dir=Path(images_dir),
-        script_file=Path(script_file),
-        output_dir=Path(output_dir),
+        images_dir=resolve_path(images_dir),
+        script_file=resolve_path(script_file),
+        output_dir=resolve_path(output_dir),
     )
+
+
+# ---------------------------------------------------------------------------
+# 初回自動読み込み（デフォルトパスの台本が存在する場合）
+# ---------------------------------------------------------------------------
+
+if st.session_state.entries is None and st.session_state.error_message is None:
+    default_script = resolve_path("input/script.md")
+    if default_script.exists():
+        try:
+            st.session_state.entries = parse_script(default_script)
+        except ValueError:
+            pass  # 自動読み込み失敗は無視。ユーザーが手動で読み込む
 
 
 # ---------------------------------------------------------------------------
@@ -192,10 +219,13 @@ with st.expander("入力設定", expanded=True):
     uploaded_script = None
 
     if script_mode == "ファイルパス入力":
+        default_script_path = "input/script.md"
+        resolved_default = resolve_path(default_script_path)
+        exists_mark = "存在する" if resolved_default.exists() else "存在しない"
         script_path_value = st.text_input(
             "台本ファイルパス",
-            value="input/script.md",
-            help="Markdownファイルのパスを入力",
+            value=default_script_path,
+            help=f"現在の解決先: {resolved_default} ({exists_mark})",
         )
     else:
         uploaded_script = st.file_uploader(
@@ -203,27 +233,49 @@ with st.expander("入力設定", expanded=True):
             type=["md", "txt"],
         )
 
+    default_images_path = "input/images"
+    resolved_images = resolve_path(default_images_path)
+    images_exists_mark = "存在する" if resolved_images.exists() else "存在しない"
     images_dir_value = st.text_input(
         "画像フォルダパス",
-        value="input/images",
-        help="スライド画像が格納されたフォルダのパスを入力",
+        value=default_images_path,
+        help=f"現在の解決先: {resolved_images} ({images_exists_mark})",
     )
+
+    # エラーメッセージ表示（リラン後も session_state から復元して表示）
+    if st.session_state.error_message:
+        st.error(st.session_state.error_message)
 
     # 台本読み込みボタン
     if st.button("台本を読み込む", type="secondary"):
+        st.session_state.error_message = None
         if script_mode == "ファイルパス入力":
             if script_path_value:
-                st.session_state.entries = load_script_from_path(script_path_value)
+                try:
+                    result = load_script_from_path(script_path_value)
+                    if result is None:
+                        resolved = resolve_path(script_path_value)
+                        st.session_state.error_message = (
+                            f"台本ファイルが見つかりません: {resolved}"
+                        )
+                    else:
+                        st.session_state.entries = result
+                        st.session_state.generated_video = None
+                except ValueError as e:
+                    st.session_state.error_message = str(e)
             else:
-                st.error("台本ファイルのパスを入力してください。")
+                st.session_state.error_message = "台本ファイルのパスを入力してください。"
         else:
             if uploaded_script is not None:
-                st.session_state.entries = load_script_from_upload(uploaded_script)
+                try:
+                    result = load_script_from_upload(uploaded_script)
+                    st.session_state.entries = result
+                    st.session_state.generated_video = None
+                except ValueError as e:
+                    st.session_state.error_message = str(e)
             else:
-                st.error("台本ファイルをアップロードしてください。")
-
-        # 台本読み込み時に前回の生成結果をクリア
-        st.session_state.generated_video = None
+                st.session_state.error_message = "台本ファイルをアップロードしてください。"
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -356,8 +408,8 @@ if entries:
                         st.write(f"「{entry.text}」")
 
                 with col_preview:
-                    # 画像プレビュー
-                    images_dir_path = Path(images_dir_value)
+                    # 画像プレビュー（resolve_path でAPP_DIR基準に解決）
+                    images_dir_path = resolve_path(images_dir_value)
                     try:
                         img_path = resolve_image_path(
                             images_dir_path, entry.number
@@ -434,7 +486,7 @@ if dry_run_clicked and entries:
 if generate_clicked and entries:
     # 台本ファイルパスの決定
     if script_mode == "ファイルパス入力":
-        effective_script_path = script_path_value
+        effective_script_path = str(resolve_path(script_path_value))
     else:
         # アップロードファイルの場合、一時ファイルとして保存
         if uploaded_script is not None:
