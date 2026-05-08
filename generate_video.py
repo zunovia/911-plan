@@ -261,8 +261,7 @@ class VoicevoxTTS(TTSProvider):
 
         # 1. audio_query: テキストからクエリJSONを取得
         query_url = (
-            f"{base_url}/audio_query"
-            f"?text={urllib.parse.quote(text)}&speaker={speaker}"
+            f"{base_url}/audio_query?text={urllib.parse.quote(text)}&speaker={speaker}"
         )
         req = urllib.request.Request(query_url, method="POST")
         try:
@@ -590,9 +589,7 @@ def concatenate_scenes_with_transition(
         else:
             a_out = f"[a{i - 1}]"
 
-        audio_filters.append(
-            f"{a_in}acrossfade=d={duration:.3f}:c1=tri:c2=tri{a_out}"
-        )
+        audio_filters.append(f"{a_in}acrossfade=d={duration:.3f}:c1=tri:c2=tri{a_out}")
 
         # 次のoffset計算のため、トランジション重なり分を引く
         cumulative_duration = offset + durations[i]

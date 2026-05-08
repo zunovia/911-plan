@@ -264,7 +264,9 @@ with st.expander("入力設定", expanded=True):
                 except ValueError as e:
                     st.session_state.error_message = str(e)
             else:
-                st.session_state.error_message = "台本ファイルのパスを入力してください。"
+                st.session_state.error_message = (
+                    "台本ファイルのパスを入力してください。"
+                )
         else:
             if uploaded_script is not None:
                 try:
@@ -274,7 +276,9 @@ with st.expander("入力設定", expanded=True):
                 except ValueError as e:
                     st.session_state.error_message = str(e)
             else:
-                st.session_state.error_message = "台本ファイルをアップロードしてください。"
+                st.session_state.error_message = (
+                    "台本ファイルをアップロードしてください。"
+                )
         st.rerun()
 
 
@@ -411,9 +415,7 @@ if entries:
                     # 画像プレビュー（resolve_path でAPP_DIR基準に解決）
                     images_dir_path = resolve_path(images_dir_value)
                     try:
-                        img_path = resolve_image_path(
-                            images_dir_path, entry.number
-                        )
+                        img_path = resolve_image_path(images_dir_path, entry.number)
                         st.image(
                             str(img_path),
                             caption=f"スライド {entry.number}",
@@ -464,7 +466,9 @@ if dry_run_clicked and entries:
     for entry in entries:
         status = "無音" if entry.is_silent else f"TTS ({len(entry.text)}文字)"
         text_preview = (
-            entry.text[:60] + "..." if len(entry.text) > 60 else entry.text or "（無音）"
+            entry.text[:60] + "..."
+            if len(entry.text) > 60
+            else entry.text or "（無音）"
         )
         dry_run_data.append(
             {
