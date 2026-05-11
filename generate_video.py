@@ -386,6 +386,7 @@ def generate_silence(output_path: Path, duration: float) -> None:
             "-f",
             "lavfi",
             "-i",
+            # サンプルレート44100Hzで統一（TTS出力と合わせる）
             "anullsrc=r=44100:cl=stereo",
             "-t",
             str(duration),
@@ -393,6 +394,8 @@ def generate_silence(output_path: Path, duration: float) -> None:
             "libmp3lame",
             "-q:a",
             "4",
+            "-ar",
+            "44100",
             str(output_path),
         ],
         f"無音生成 ({duration}s)",
@@ -429,6 +432,8 @@ def create_scene(
     total_duration = duration + config.padding_before + config.padding_after
     width, height = config.resolution
 
+    delay_ms = int(config.padding_before * 1000)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg(
         [
@@ -438,16 +443,10 @@ def create_scene(
             str(image_path),
             "-i",
             str(audio_path),
-            "-t",
-            f"{total_duration:.3f}",
-            "-vf",
-            (
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                "format=yuv420p"
-            ),
             "-c:v",
             "libx264",
+            "-tune",
+            "stillimage",
             "-preset",
             "medium",
             "-crf",
@@ -456,11 +455,26 @@ def create_scene(
             "aac",
             "-b:a",
             "192k",
-            "-af",
-            f"adelay={int(config.padding_before * 1000)}|{int(config.padding_before * 1000)},apad",
-            "-shortest",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-vf",
+            (
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+            ),
+            "-pix_fmt",
+            "yuv420p",
             "-r",
             str(config.fps),
+            "-af",
+            # adelayで前方パディング、apad=pad_durで後方パディングを制限付きで追加
+            f"adelay={delay_ms}|{delay_ms},apad=pad_dur={config.padding_after:.3f}",
+            "-t",
+            f"{total_duration:.3f}",
+            "-movflags",
+            "+faststart",
             str(output_path),
         ],
         f"シーン生成 ({output_path.name})",
@@ -492,6 +506,8 @@ def concatenate_scenes(scene_paths: list[Path], output_path: Path) -> None:
                 concat_list,
                 "-c",
                 "copy",
+                "-movflags",
+                "+faststart",
                 str(output_path),
             ],
             "シーン結合",
@@ -626,6 +642,10 @@ def concatenate_scenes_with_transition(
             "aac",
             "-b:a",
             "192k",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
             str(output_path),
         ],
         f"トランジション結合 ({config.transition})",
@@ -675,6 +695,8 @@ def mix_bgm(video_path: Path, config: Config) -> Path:
             "aac",
             "-b:a",
             "192k",
+            "-movflags",
+            "+faststart",
             str(output_path),
         ],
         "BGM合成",
@@ -689,7 +711,207 @@ def mix_bgm(video_path: Path, config: Config) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 4. 画像ファイル解決
+# 4. 動画クリップからのシーン生成
+# ---------------------------------------------------------------------------
+
+
+def resolve_video_clip_path(clips_dir: Path, slide_number: int) -> Path:
+    """スライド番号から動画クリップファイルパスを解決する.
+
+    以下のパターンを順に探す:
+      - slide_{N}.webm
+      - slide_{N}.mp4
+    """
+    candidates = [
+        clips_dir / f"slide_{slide_number}.webm",
+        clips_dir / f"slide_{slide_number}.mp4",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+
+    raise FileNotFoundError(
+        f"スライド{slide_number}の動画クリップが見つかりません。\n"
+        f"  検索パス: {', '.join(str(c) for c in candidates)}"
+    )
+
+
+def create_scene_from_video(
+    video_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    config: Config,
+) -> None:
+    """動画クリップ + 音声 → MP4シーンを生成する.
+
+    create_scene のビデオ版。元の動画ファイルを変更せず、その上に生成した音声を
+    重ねる方式。映像は -c:v copy でストリームコピーするため、再エンコードによる
+    画質劣化がなく高速に処理される。
+
+    動画クリップは -stream_loop -1 で無限ループ再生され、-t で必要な長さに
+    トリムされるため、黒画面が発生しない。
+    """
+    audio_duration = get_audio_duration(audio_path)
+    total_duration = audio_duration + config.padding_before + config.padding_after
+
+    delay_ms = int(config.padding_before * 1000)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(
+        [
+            "-stream_loop",
+            "-1",  # 動画を無限ループ再生（-t でトリム）
+            "-i",
+            str(video_path),
+            "-i",
+            str(audio_path),
+            "-c:v",
+            "copy",  # 映像はそのままコピー（再エンコードなし）
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-af",
+            f"adelay={delay_ms}|{delay_ms},apad=pad_dur={config.padding_after:.3f}",
+            "-t",
+            f"{total_duration:.3f}",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        f"ビデオシーン生成 ({output_path.name})",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. フル動画ナレーション合成
+# ---------------------------------------------------------------------------
+
+
+def overlay_narration(
+    video_path: Path,
+    audio_entries: list[tuple[Path, float]],
+    output_path: Path,
+    config: Config,
+) -> None:
+    """フル動画にTTSナレーション音声をオーバーレイする.
+
+    元の連続動画に、各スライドのTTS音声を指定タイミングで重ねる。
+
+    動作原理:
+    1. 必要な全体尺を計算（動画の長さ vs 最後の音声が終わる時刻）
+    2. 動画が短い場合は tpad=stop_mode=clone で最終フレームを引き伸ばす
+    3. anullsrc で全体尺分の無音トラックを生成し amix の先頭に配置
+       → duration=first で全尺が保証され、音声が途切れない
+
+    Args:
+        video_path: 元のフル動画ファイル（full_presentation.webm等）.
+        audio_entries: (音声ファイルパス, 開始秒) のリスト。無音スライドは含めない。
+        output_path: 出力MP4ファイルパス.
+        config: 設定（解像度・FPS等）.
+    """
+    width, height = config.resolution
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- 必要な全体尺を計算 ---
+    video_dur = get_video_duration(video_path)
+
+    required_dur = video_dur
+    for audio_path, start_time in audio_entries:
+        audio_dur = get_audio_duration(audio_path)
+        end_time = start_time + audio_dur + config.padding_after
+        required_dur = max(required_dur, end_time)
+
+    # 安全マージン追加
+    required_dur += 1.0
+    extend_dur = max(0.0, required_dur - video_dur)
+
+    log.info(
+        "  動画: %.1fs, 必要尺: %.1fs, 延長: %.1fs",
+        video_dur,
+        required_dur,
+        extend_dur,
+    )
+
+    # --- FFmpegコマンド構築 ---
+    inputs: list[str] = ["-i", str(video_path)]
+    for audio_path, _ in audio_entries:
+        inputs.extend(["-i", str(audio_path)])
+
+    filters: list[str] = []
+
+    # ビデオ: スケーリング + 必要に応じて最終フレームで延長
+    video_filter = (
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+    )
+    if extend_dur > 0:
+        video_filter += f",tpad=stop_mode=clone:stop_duration={extend_dur:.3f}"
+    video_filter += "[vout]"
+    filters.append(video_filter)
+
+    if audio_entries:
+        # 無音ベッドトラック（全体尺分）→ amix の先頭入力にして duration=first で保証
+        filters.append(
+            f"anullsrc=r=44100:cl=stereo,atrim=0:{required_dur:.3f}[silence]"
+        )
+
+        # 各TTS音声にディレイを適用
+        for i, (_, start_time) in enumerate(audio_entries):
+            delay_ms = int(start_time * 1000)
+            filters.append(f"[{i + 1}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+
+        # ミックス: [silence] を先頭に置き duration=first で全尺保証
+        n_inputs = len(audio_entries) + 1  # +1 for silence bed
+        mix_inputs = "[silence]" + "".join(
+            f"[a{i}]" for i in range(len(audio_entries))
+        )
+        filters.append(
+            f"{mix_inputs}amix=inputs={n_inputs}"
+            f":duration=first:dropout_transition=0:normalize=0[aout]"
+        )
+
+        map_args = ["-map", "[vout]", "-map", "[aout]"]
+        audio_args = ["-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2"]
+    else:
+        map_args = ["-map", "[vout]"]
+        audio_args = ["-an"]
+
+    filter_complex = ";".join(filters)
+
+    _run_ffmpeg(
+        [
+            *inputs,
+            "-filter_complex",
+            filter_complex,
+            *map_args,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "23",
+            *audio_args,
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(config.fps),
+            "-t",
+            f"{required_dur:.3f}",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        "ナレーション合成",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. 画像ファイル解決
 # ---------------------------------------------------------------------------
 
 
@@ -717,7 +939,7 @@ def resolve_image_path(images_dir: Path, slide_number: int) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 5. メインフロー
+# 6. メインフロー
 # ---------------------------------------------------------------------------
 
 
@@ -727,6 +949,9 @@ def process_slides(
     *,
     target_slide: int | None = None,
     dry_run: bool = False,
+    video_clips_dir: Path | None = None,
+    full_video_path: Path | None = None,
+    slide_timestamps: list[float] | None = None,
 ) -> Path | None:
     """スライドを処理して最終動画を生成する."""
     audio_dir = config.output_dir / "audio"
@@ -762,6 +987,73 @@ def process_slides(
             )
         return None
 
+    # --- フル動画オーバーレイモード ---
+    if full_video_path is not None and slide_timestamps is not None:
+        audio_dir = config.output_dir / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        tts = get_tts_provider(config.tts_provider)
+        audio_entries: list[tuple[Path, float]] = []
+
+        for idx, entry in enumerate(entries):
+            log.info(
+                "スライド %d/%d TTS生成中 (スライド%d: %s)...",
+                idx + 1,
+                total,
+                entry.number,
+                entry.title,
+            )
+
+            if entry.is_silent:
+                log.info("  スキップ（無音スライド）")
+                continue
+
+            audio_path = audio_dir / f"slide_{entry.number:02d}.mp3"
+            tts.synthesize(entry.text, audio_path, config)
+
+            # タイムスタンプから開始位置を計算（スライド番号で直接参照）
+            slide_idx = entry.number - 1  # 1-indexed → 0-indexed
+            if slide_idx < len(slide_timestamps):
+                audio_start = slide_timestamps[slide_idx] + config.padding_before
+            else:
+                log.warning(
+                    "スライド%dのタイムスタンプがありません。スキップします。",
+                    entry.number,
+                )
+                continue
+
+            audio_entries.append((audio_path, audio_start))
+            log.info("  TTS完了 → 配置: %.1f秒", audio_start)
+
+        # --- 重なり防止: 前の音声が終わるまで次の開始を遅延 ---
+        for i in range(1, len(audio_entries)):
+            prev_path, prev_start = audio_entries[i - 1]
+            prev_dur = get_audio_duration(prev_path)
+            prev_end = prev_start + prev_dur + config.padding_after
+            cur_path, cur_start = audio_entries[i]
+            if prev_end > cur_start:
+                new_start = prev_end
+                log.warning(
+                    "  音声重なり検出: 前の音声が %.1fs まで続くため、"
+                    "次の開始を %.1fs → %.1fs に遅延",
+                    prev_end,
+                    cur_start,
+                    new_start,
+                )
+                audio_entries[i] = (cur_path, new_start)
+
+        final_path = config.output_dir / "final.mp4"
+        log.info("ナレーション合成中...")
+        overlay_narration(full_video_path, audio_entries, final_path, config)
+
+        # BGM合成（有効な場合）
+        if config.bgm.enabled and config.bgm.file:
+            final_path = mix_bgm(final_path, config)
+
+        log.info("完了: %s", final_path)
+        return final_path
+
+    # --- 従来モード（シーン分割＋結合）---
     scene_paths: list[Path] = []
 
     for idx, entry in enumerate(entries, 1):
@@ -773,9 +1065,6 @@ def process_slides(
             entry.title,
         )
 
-        # 画像解決
-        image_path = resolve_image_path(config.images_dir, entry.number)
-
         # 音声生成
         audio_path = audio_dir / f"slide_{entry.number:02d}.mp3"
         if entry.is_silent:
@@ -783,9 +1072,14 @@ def process_slides(
         else:
             tts.synthesize(entry.text, audio_path, config)
 
-        # シーン生成
+        # シーン生成（動画クリップモード or 静止画モード）
         scene_path = scenes_dir / f"scene_{entry.number:02d}.mp4"
-        create_scene(image_path, audio_path, scene_path, config)
+        if video_clips_dir is not None:
+            video_clip = resolve_video_clip_path(video_clips_dir, entry.number)
+            create_scene_from_video(video_clip, audio_path, scene_path, config)
+        else:
+            image_path = resolve_image_path(config.images_dir, entry.number)
+            create_scene(image_path, audio_path, scene_path, config)
         scene_paths.append(scene_path)
         log.info(
             "  シーン完了: %s (%.1fs)",

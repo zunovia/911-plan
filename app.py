@@ -19,6 +19,7 @@ from generate_video import (
     BGMConfig,
     Config,
     SlideEntry,
+    get_video_duration,
     parse_script,
     process_slides,
     resolve_image_path,
@@ -102,8 +103,379 @@ st.set_page_config(
     layout="centered",
 )
 
-st.title("紙芝居動画ジェネレーター")
-st.caption("Markdown台本 + スライド画像 から TTS ナレーション付き MP4 動画を生成")
+# ---------------------------------------------------------------------------
+# カスタム CSS — モダンUI スタイリング
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    """
+<style>
+/* ===== Google Fonts ===== */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&display=swap');
+
+/* ===== グローバル ===== */
+.stApp {
+    font-family: 'Noto Sans JP', sans-serif;
+}
+
+/* メインコンテナの余白調整 */
+.block-container {
+    padding-top: 1rem !important;
+    max-width: 900px !important;
+}
+
+/* ===== カスタムヘッダー ===== */
+.app-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 16px;
+    padding: 2rem 2.5rem;
+    margin-bottom: 1.5rem;
+    color: white;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 10px 40px rgba(102, 126, 234, 0.3);
+}
+.app-header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -20%;
+    width: 300px;
+    height: 300px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 50%;
+}
+.app-header::after {
+    content: '';
+    position: absolute;
+    bottom: -30%;
+    left: -10%;
+    width: 200px;
+    height: 200px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 50%;
+}
+.app-header h1 {
+    margin: 0 0 0.3rem 0;
+    font-size: 1.8rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    position: relative;
+    z-index: 1;
+}
+.app-header p {
+    margin: 0;
+    font-size: 0.95rem;
+    opacity: 0.9;
+    font-weight: 300;
+    position: relative;
+    z-index: 1;
+}
+
+/* ===== セクションタイトル ===== */
+.section-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin: 1.2rem 0 0.6rem 0;
+    padding-bottom: 0.4rem;
+    border-bottom: 2px solid;
+    border-image: linear-gradient(90deg, #667eea, transparent) 1;
+}
+.section-title .icon {
+    font-size: 1.2rem;
+}
+
+/* ===== Expander スタイリング ===== */
+.stExpander {
+    border: 1px solid rgba(128, 128, 128, 0.15) !important;
+    border-radius: 12px !important;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06) !important;
+    margin-bottom: 0.8rem !important;
+    overflow: hidden;
+    transition: box-shadow 0.3s ease;
+}
+.stExpander:hover {
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1) !important;
+}
+.stExpander > details > summary {
+    font-weight: 600 !important;
+    font-size: 0.95rem !important;
+    padding: 0.8rem 1rem !important;
+}
+
+/* ===== ボタン — プライマリ ===== */
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="stBaseButton-primary"] {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    font-size: 1rem !important;
+    padding: 0.6rem 1.5rem !important;
+    letter-spacing: 0.02em;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.35) !important;
+    transition: all 0.3s ease !important;
+}
+.stButton > button[kind="primary"]:hover,
+.stButton > button[data-testid="stBaseButton-primary"]:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 25px rgba(102, 126, 234, 0.5) !important;
+}
+
+/* ===== ボタン — セカンダリ ===== */
+.stButton > button[kind="secondary"],
+.stButton > button[data-testid="stBaseButton-secondary"] {
+    border-radius: 10px !important;
+    font-weight: 500 !important;
+    border: 1.5px solid #667eea !important;
+    color: #667eea !important;
+    background: transparent !important;
+    transition: all 0.3s ease !important;
+}
+.stButton > button[kind="secondary"]:hover,
+.stButton > button[data-testid="stBaseButton-secondary"]:hover {
+    background: rgba(102, 126, 234, 0.08) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* ===== ダウンロードボタン ===== */
+.stDownloadButton > button {
+    background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%) !important;
+    border: none !important;
+    border-radius: 10px !important;
+    color: white !important;
+    font-weight: 600 !important;
+    box-shadow: 0 4px 15px rgba(17, 153, 142, 0.35) !important;
+    transition: all 0.3s ease !important;
+}
+.stDownloadButton > button:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 25px rgba(17, 153, 142, 0.5) !important;
+}
+
+/* ===== テキスト入力 ===== */
+.stTextInput > div > div > input {
+    border-radius: 8px !important;
+    border: 1.5px solid rgba(128, 128, 128, 0.25) !important;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease !important;
+}
+.stTextInput > div > div > input:focus {
+    border-color: #667eea !important;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15) !important;
+}
+
+/* ===== セレクトボックス ===== */
+.stSelectbox > div > div {
+    border-radius: 8px !important;
+}
+
+/* ===== スライダー ===== */
+.stSlider > div > div > div > div {
+    background: linear-gradient(90deg, #667eea, #764ba2) !important;
+}
+
+/* ===== プログレスバー ===== */
+.stProgress > div > div > div {
+    background: linear-gradient(90deg, #667eea, #764ba2) !important;
+    border-radius: 10px !important;
+}
+
+/* ===== コンテナ（border=True）のスタイリング ===== */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 10px !important;
+    border-color: rgba(128, 128, 128, 0.15) !important;
+    transition: box-shadow 0.3s ease;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+
+/* ===== テーブル ===== */
+.stTable {
+    border-radius: 10px !important;
+    overflow: hidden;
+}
+.stTable table {
+    border-collapse: separate !important;
+    border-spacing: 0 !important;
+}
+.stTable thead th {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    color: white !important;
+    font-weight: 600 !important;
+    padding: 0.7rem 1rem !important;
+    font-size: 0.85rem !important;
+}
+.stTable tbody td {
+    padding: 0.6rem 1rem !important;
+    font-size: 0.85rem !important;
+}
+.stTable tbody tr:nth-child(even) {
+    background: rgba(102, 126, 234, 0.03);
+}
+
+/* ===== アラート系のスタイリング ===== */
+.stAlert {
+    border-radius: 10px !important;
+}
+
+/* ===== サイドバー ===== */
+[data-testid="stSidebar"] .sidebar-info {
+    background: rgba(102, 126, 234, 0.08);
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 0.8rem;
+    border-left: 3px solid #667eea;
+}
+[data-testid="stSidebar"] .sidebar-info h4 {
+    margin: 0 0 0.4rem 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #667eea;
+}
+[data-testid="stSidebar"] .sidebar-info p {
+    margin: 0;
+    font-size: 0.8rem;
+    opacity: 0.85;
+    line-height: 1.5;
+}
+
+/* ===== 動画プレーヤー ===== */
+.stVideo {
+    border-radius: 12px !important;
+    overflow: hidden;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* ===== ファイルアップローダー ===== */
+[data-testid="stFileUploader"] section {
+    border-radius: 10px !important;
+    border: 2px dashed rgba(102, 126, 234, 0.3) !important;
+    transition: border-color 0.3s ease;
+}
+[data-testid="stFileUploader"] section:hover {
+    border-color: #667eea !important;
+}
+
+/* ===== 結果セクション装飾 ===== */
+.result-header {
+    background: linear-gradient(135deg, rgba(17, 153, 142, 0.08) 0%, rgba(56, 239, 125, 0.08) 100%);
+    border: 1px solid rgba(17, 153, 142, 0.2);
+    border-radius: 12px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 1rem;
+}
+.result-header h3 {
+    margin: 0;
+    font-weight: 700;
+    font-size: 1.1rem;
+}
+
+/* ===== スクロールバー ===== */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(102, 126, 234, 0.3);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(102, 126, 234, 0.5);
+}
+
+/* ===== フェードインアニメーション ===== */
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+.stExpander {
+    animation: fadeInUp 0.4s ease-out;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------------------
+# カスタムヘッダー
+# ---------------------------------------------------------------------------
+
+st.markdown(
+    """
+<div class="app-header">
+    <h1>🎬 紙芝居動画ジェネレーター</h1>
+    <p>Markdown台本 + スライド画像 から TTS ナレーション付き MP4 動画を生成</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------------------
+# サイドバー — プロジェクト情報・ヘルプ
+# ---------------------------------------------------------------------------
+
+with st.sidebar:
+    st.markdown(
+        """
+<div style="text-align:center; padding: 1rem 0 0.5rem 0;">
+    <span style="font-size: 2.5rem;">🎬</span>
+    <h3 style="margin: 0.3rem 0 0 0; font-weight: 700; font-size: 1.1rem;">
+        Kamishibai Studio
+    </h3>
+    <p style="margin: 0; font-size: 0.75rem; opacity: 0.6;">v1.0</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+    st.markdown(
+        """
+<div class="sidebar-info">
+    <h4>📋 使い方</h4>
+    <p>
+        1. 台本(.md)を読み込む<br/>
+        2. 画像ソースを指定<br/>
+        3. TTS・動画設定を調整<br/>
+        4.「動画生成」をクリック
+    </p>
+</div>
+<div class="sidebar-info">
+    <h4>🎙️ 対応TTS</h4>
+    <p>
+        Google Cloud TTS<br/>
+        VOICEVOX
+    </p>
+</div>
+<div class="sidebar-info">
+    <h4>🖼️ 画像ソース</h4>
+    <p>
+        フォルダ読込 / HTML静止画<br/>
+        HTMLアニメ録画 / 外部動画
+    </p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+    output_dir_value = st.text_input(
+        "出力ディレクトリ",
+        value="output",
+        help="生成された動画の保存先",
+        key="output_dir_sidebar",
+    )
 
 # ---------------------------------------------------------------------------
 # セッションステート初期化
@@ -126,7 +498,7 @@ if "error_message" not in st.session_state:
 
 def resolve_path(user_path: str) -> Path:
     """ユーザー入力パスを解決する。絶対パスならそのまま、相対パスならAPP_DIR基準。"""
-    p = Path(user_path)
+    p = Path(user_path.strip().strip('"').strip("'"))
     if p.is_absolute():
         return p
     return APP_DIR / p
@@ -204,23 +576,14 @@ def build_config(
 
 
 # ---------------------------------------------------------------------------
-# 初回自動読み込み（デフォルトパスの台本が存在する場合）
-# ---------------------------------------------------------------------------
-
-if st.session_state.entries is None and st.session_state.error_message is None:
-    default_script = resolve_path("input/script.md")
-    if default_script.exists():
-        try:
-            st.session_state.entries = parse_script(default_script)
-        except Exception as e:
-            st.session_state.error_message = f"自動読み込みエラー: {type(e).__name__}: {e}"
-
-
-# ---------------------------------------------------------------------------
 # 入力設定
 # ---------------------------------------------------------------------------
 
-with st.expander("入力設定", expanded=True):
+st.markdown(
+    '<div class="section-title"><span class="icon">📂</span> 入力設定</div>',
+    unsafe_allow_html=True,
+)
+with st.expander("台本・画像ソース", expanded=True):
     script_mode = st.radio(
         "台本ファイルの指定方法",
         ["ファイルパス入力", "ファイルアップロード"],
@@ -231,13 +594,11 @@ with st.expander("入力設定", expanded=True):
     uploaded_script = None
 
     if script_mode == "ファイルパス入力":
-        default_script_path = "input/script.md"
-        resolved_default = resolve_path(default_script_path)
-        exists_mark = "存在する" if resolved_default.exists() else "存在しない"
         script_path_value = st.text_input(
             "台本ファイルパス",
-            value=default_script_path,
-            help=f"現在の解決先: {resolved_default} ({exists_mark})",
+            value="",
+            placeholder="例: input/script.md",
+            help="台本ファイル(.md)のパスを入力してください",
         )
     else:
         uploaded_script = st.file_uploader(
@@ -250,25 +611,34 @@ with st.expander("入力設定", expanded=True):
 
     image_source = st.radio(
         "画像の取得方法",
-        ["フォルダから読み込み", "HTMLファイルから生成"],
+        [
+            "フォルダから読み込み",
+            "HTMLファイルから生成（静止画）",
+            "HTMLアニメーション録画（動画）",
+            "外部動画ファイル（ナレーションオーバーレイ）",
+        ],
         horizontal=True,
     )
 
+    # video_clips_dir はHTMLアニメーション録画モードでのみ使用
+    video_clips_dir_value: str | None = None
+    # 外部動画ファイルモード用
+    external_video_path_value: str | None = None
+
     if image_source == "フォルダから読み込み":
-        default_images_path = "input/images"
-        resolved_images = resolve_path(default_images_path)
-        images_exists_mark = "存在する" if resolved_images.exists() else "存在しない"
         images_dir_value = st.text_input(
             "画像フォルダパス",
-            value=default_images_path,
-            help=f"現在の解決先: {resolved_images} ({images_exists_mark})",
+            value="",
+            placeholder="例: input/images",
+            help="スライド画像が入ったフォルダのパスを入力してください",
         )
-    else:
-        # HTML -> 画像変換モード
+    elif image_source == "HTMLファイルから生成（静止画）":
+        # HTML -> 画像変換モード（既存）
         html_file_path = st.text_input(
             "HTMLファイルパス",
             value="",
             help="Claude Artifact等のHTMLファイルのパスを入力",
+            key="html_screenshot_path",
         )
         col_slides, col_key, col_wait = st.columns(3)
         with col_slides:
@@ -278,12 +648,14 @@ with st.expander("入力設定", expanded=True):
                 max_value=100,
                 value=14,
                 step=1,
+                key="screenshot_num_slides",
             )
         with col_key:
             html_nav_key = st.selectbox(
                 "遷移キー",
                 ["ArrowRight", "ArrowLeft", "ArrowDown", "Space", "Enter"],
                 index=0,
+                key="screenshot_nav_key",
             )
         with col_wait:
             html_wait_time = st.number_input(
@@ -292,6 +664,7 @@ with st.expander("入力設定", expanded=True):
                 max_value=10.0,
                 value=2.0,
                 step=0.5,
+                key="screenshot_wait_time",
             )
 
         images_dir_value = "input/images"
@@ -326,6 +699,7 @@ with st.expander("入力設定", expanded=True):
                                 num_slides=int(html_num_slides),
                                 nav_key=html_nav_key,
                                 wait=float(html_wait_time),
+                                progress_callback=_update_progress,
                             )
                         progress_bar.progress(1.0)
                         st.success(
@@ -338,6 +712,129 @@ with st.expander("入力設定", expanded=True):
                         st.error(str(e))
                     except Exception as e:
                         st.error(f"スクリーンショット撮影エラー: {e}")
+    elif image_source == "HTMLアニメーション録画（動画）":
+        # HTMLアニメーション録画モード（新規）
+        html_video_path = st.text_input(
+            "HTMLファイルパス",
+            value="",
+            help="アニメーション付きHTMLファイルのパスを入力",
+            key="html_video_path",
+        )
+        col_vslides, col_vkey, col_vwait = st.columns(3)
+        with col_vslides:
+            html_video_num_slides = st.number_input(
+                "スライド数",
+                min_value=1,
+                max_value=100,
+                value=14,
+                step=1,
+                key="video_num_slides",
+            )
+        with col_vkey:
+            html_video_nav_key = st.selectbox(
+                "遷移キー",
+                ["ArrowRight", "ArrowLeft", "ArrowDown", "Space", "Enter"],
+                index=0,
+                key="video_nav_key",
+            )
+        with col_vwait:
+            html_video_wait_time = st.number_input(
+                "初回待機（秒）",
+                min_value=0.5,
+                max_value=10.0,
+                value=2.0,
+                step=0.5,
+                key="video_wait_time",
+            )
+        html_video_animation_wait = st.number_input(
+            "アニメーション時間（秒）",
+            min_value=1.0,
+            max_value=30.0,
+            value=3.0,
+            step=0.5,
+            help="各スライドのアニメーション再生待ち時間",
+            key="video_animation_wait",
+        )
+
+        images_dir_value = "input/images"
+        video_clips_dir_value = "output/clips"
+
+        if st.button("アニメーション録画実行", type="secondary"):
+            if not html_video_path:
+                st.error("HTMLファイルのパスを入力してください。")
+            else:
+                resolved_html = resolve_path(html_video_path)
+                if not resolved_html.exists():
+                    st.error(f"HTMLファイルが見つかりません: {resolved_html}")
+                else:
+                    try:
+                        from html_to_video import record_full_presentation
+
+                        clips_output = resolve_path(video_clips_dir_value)
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+
+                        def _update_video_progress(
+                            current: int, total: int, path: Path
+                        ) -> None:
+                            progress_bar.progress(current / total)
+                            status_text.text(
+                                f"スライド {current}/{total} 録画中..."
+                            )
+
+                        with st.spinner("HTMLアニメーションをフル録画中..."):
+                            video_path, timestamps = record_full_presentation(
+                                html_path=str(resolved_html),
+                                output_dir=str(clips_output),
+                                num_slides=int(html_video_num_slides),
+                                nav_key=html_video_nav_key,
+                                wait=float(html_video_wait_time),
+                                animation_wait=float(html_video_animation_wait),
+                                progress_callback=_update_video_progress,
+                            )
+                        progress_bar.progress(1.0)
+                        st.success(
+                            f"フル録画完了: {video_path.name}"
+                            f" ({len(timestamps)}スライド)"
+                        )
+                    except FileNotFoundError as e:
+                        st.error(str(e))
+                    except RuntimeError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"アニメーション録画エラー: {e}")
+    else:
+        # 外部動画ファイル（ナレーションオーバーレイ）モード
+        external_video_path_value = st.text_input(
+            "動画ファイルパス",
+            value="",
+            placeholder="例: C:/Videos/presentation.mp4",
+            help=(
+                "ナレーションを重ねたい動画ファイルのパスを入力してください。"
+                "対応フォーマット: MP4, MOV, AVI, MKV, WebM, WMV 等（FFmpeg対応形式全て）"
+            ),
+            key="external_video_path",
+        )
+        images_dir_value = "input/images"  # 画像は不要だがConfig構築に必要
+
+        # 動画情報の取得・表示
+        if external_video_path_value:
+            resolved_ext_video = resolve_path(external_video_path_value)
+            if resolved_ext_video.exists():
+                try:
+                    ext_video_duration = get_video_duration(resolved_ext_video)
+                    st.info(
+                        f"動画ファイル: {resolved_ext_video.name}  |  "
+                        f"長さ: {ext_video_duration:.1f}秒 "
+                        f"({int(ext_video_duration // 60)}分{ext_video_duration % 60:.1f}秒)"
+                    )
+                    # session_stateに動画情報を保存
+                    st.session_state["ext_video_duration"] = ext_video_duration
+                    st.session_state["ext_video_path"] = str(resolved_ext_video)
+                except Exception as e:
+                    st.warning(f"動画情報の取得に失敗しました: {e}")
+            else:
+                st.warning(f"動画ファイルが見つかりません: {resolved_ext_video}")
 
     # エラーメッセージ表示（リラン後も session_state から復元して表示）
     if st.session_state.error_message:
@@ -383,7 +880,11 @@ with st.expander("入力設定", expanded=True):
 # TTS設定
 # ---------------------------------------------------------------------------
 
-with st.expander("TTS設定"):
+st.markdown(
+    '<div class="section-title"><span class="icon">🎙️</span> 音声・動画設定</div>',
+    unsafe_allow_html=True,
+)
+with st.expander("TTS設定（音声合成）"):
     tts_provider = st.radio(
         "TTSプロバイダー",
         ["Google Cloud TTS", "VOICEVOX"],
@@ -460,7 +961,7 @@ with st.expander("TTS設定"):
 # 動画設定
 # ---------------------------------------------------------------------------
 
-with st.expander("動画設定"):
+with st.expander("動画設定（解像度・トランジション）"):
     resolution_label = st.selectbox(
         "解像度",
         list(RESOLUTION_OPTIONS.keys()),
@@ -489,7 +990,7 @@ with st.expander("動画設定"):
 # BGM設定
 # ---------------------------------------------------------------------------
 
-with st.expander("BGM設定"):
+with st.expander("BGM設定（バックグラウンドミュージック）"):
     bgm_enabled = st.checkbox("BGMを有効にする", value=False)
     bgm_file_value = ""
     bgm_volume = 0.15
@@ -516,7 +1017,11 @@ with st.expander("BGM設定"):
 entries: list[SlideEntry] | None = st.session_state.entries
 
 if entries:
-    with st.expander("台本プレビュー", expanded=True):
+    st.markdown(
+        '<div class="section-title"><span class="icon">📖</span> 台本プレビュー</div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander(f"全 {len(entries)} スライド", expanded=True):
         st.write(f"**{len(entries)} スライド検出**")
 
         # スライドタブ表示
@@ -551,37 +1056,94 @@ if entries:
 
 
 # ---------------------------------------------------------------------------
+# タイムスタンプ入力（外部動画モード時のみ）
+# ---------------------------------------------------------------------------
+
+if "manual_timestamps" not in st.session_state:
+    st.session_state.manual_timestamps = {}
+
+if (
+    image_source == "外部動画ファイル（ナレーションオーバーレイ）"
+    and entries
+    and external_video_path_value
+):
+    with st.expander("タイムスタンプ設定", expanded=True):
+        st.write("各スライドのナレーション開始時刻（秒）を指定してください。")
+
+        ext_dur = st.session_state.get("ext_video_duration", 0.0)
+        if ext_dur > 0:
+            st.caption(f"動画の長さ: {ext_dur:.1f}秒")
+
+        # 均等分割ボタン
+        if ext_dur > 0 and st.button("均等分割で自動入力", key="auto_timestamps"):
+            interval = ext_dur / len(entries)
+            for i, entry in enumerate(entries):
+                st.session_state.manual_timestamps[entry.number] = round(
+                    i * interval, 1
+                )
+            st.rerun()
+
+        # 各スライドの開始秒数入力
+        cols_per_row = 3
+        for row_start in range(0, len(entries), cols_per_row):
+            row_entries = entries[row_start : row_start + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for col, entry in zip(cols, row_entries):
+                with col:
+                    default_val = st.session_state.manual_timestamps.get(
+                        entry.number, 0.0
+                    )
+                    ts_val = st.number_input(
+                        f"スライド{entry.number}: {entry.title[:10]}",
+                        min_value=0.0,
+                        max_value=max(ext_dur, 86400.0),
+                        value=float(default_val),
+                        step=0.5,
+                        format="%.1f",
+                        key=f"ts_slide_{entry.number}",
+                    )
+                    st.session_state.manual_timestamps[entry.number] = ts_val
+
+
+# ---------------------------------------------------------------------------
 # 実行ボタン
 # ---------------------------------------------------------------------------
 
-st.divider()
+st.markdown(
+    '<div class="section-title"><span class="icon">🚀</span> 実行</div>',
+    unsafe_allow_html=True,
+)
 
 col_dry, col_gen = st.columns(2)
 
 with col_dry:
     dry_run_clicked = st.button(
-        "ドライラン",
+        "🔍 ドライラン",
         disabled=(entries is None),
         use_container_width=True,
     )
 
 with col_gen:
     generate_clicked = st.button(
-        "動画生成",
+        "🎬 動画生成",
         type="primary",
         disabled=(entries is None),
         use_container_width=True,
     )
 
-# 出力ディレクトリ
-output_dir_value = "output"
+# 出力ディレクトリ（サイドバーで設定済み。未設定時のフォールバック）
+if "output_dir_sidebar" not in st.session_state:
+    output_dir_value = "output"
 
 # ---------------------------------------------------------------------------
 # ドライラン実行
 # ---------------------------------------------------------------------------
 
 if dry_run_clicked and entries:
-    st.subheader("ドライラン結果")
+    st.markdown(
+        '<div class="result-header"><h3>🔍 ドライラン結果</h3></div>',
+        unsafe_allow_html=True,
+    )
 
     # テーブル表示
     dry_run_data = []
@@ -665,7 +1227,76 @@ if generate_clicked and entries:
                 f"処理中: {len(entries)} スライド ({config.tts_provider} / "
                 f"{resolution_label} / {transition_label})"
             )
-            result_path = process_slides(entries, config)
+            # --- 外部動画ファイルモード ---
+            if (
+                image_source == "外部動画ファイル（ナレーションオーバーレイ）"
+                and external_video_path_value
+            ):
+                ext_video = resolve_path(external_video_path_value)
+                if not ext_video.exists():
+                    st.error(f"動画ファイルが見つかりません: {ext_video}")
+                    st.stop()
+
+                # 手動タイムスタンプをリスト形式に変換
+                manual_ts = st.session_state.get("manual_timestamps", {})
+                max_slide_num = max(e.number for e in entries)
+                ts_list = []
+                for i in range(max_slide_num):
+                    slide_num = i + 1  # 1-indexed
+                    ts_list.append(manual_ts.get(slide_num, 0.0))
+
+                st.info(
+                    f"外部動画ファイルでナレーションオーバーレイモードで生成します。"
+                    f" ({ext_video.name})"
+                )
+                result_path = process_slides(
+                    entries,
+                    config,
+                    full_video_path=ext_video,
+                    slide_timestamps=ts_list,
+                )
+
+            # --- フル動画オーバーレイモードの自動検出 / 従来モード ---
+            else:
+                full_video = resolve_path("output/clips/full_presentation.webm")
+                timestamps_file = resolve_path("output/clips/timestamps.json")
+
+                if full_video.exists() and timestamps_file.exists():
+                    # フル動画 + タイムスタンプが存在 → オーバーレイモード
+                    import json as _json
+
+                    ts_data = _json.loads(
+                        timestamps_file.read_text(encoding="utf-8")
+                    )
+                    st.info(
+                        "フル録画動画を検出しました。"
+                        "ナレーションオーバーレイモードで生成します。"
+                    )
+                    result_path = process_slides(
+                        entries,
+                        config,
+                        full_video_path=full_video,
+                        slide_timestamps=ts_data["timestamps"],
+                    )
+                else:
+                    # 従来モード: 動画クリップ or 静止画
+                    vcd = None
+                    if video_clips_dir_value:
+                        vcd = resolve_path(video_clips_dir_value)
+                    if vcd is None:
+                        auto_clips = resolve_path("output/clips")
+                        if auto_clips.is_dir() and (
+                            any(auto_clips.glob("slide_*.webm"))
+                            or any(auto_clips.glob("slide_*.mp4"))
+                        ):
+                            vcd = auto_clips
+                            st.info(
+                                "output/clips に動画クリップを検出しました。"
+                                "動画クリップモードで生成します。"
+                            )
+                    result_path = process_slides(
+                        entries, config, video_clips_dir=vcd
+                    )
 
         if result_path and result_path.exists():
             st.session_state.generated_video = str(result_path)
@@ -694,7 +1325,14 @@ if generate_clicked and entries:
 if st.session_state.generated_video:
     video_path = Path(st.session_state.generated_video)
     if video_path.exists():
-        st.subheader("生成結果")
+        st.markdown(
+            '<div class="section-title"><span class="icon">✅</span> 生成結果</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="result-header"><h3>🎉 動画の生成が完了しました</h3></div>',
+            unsafe_allow_html=True,
+        )
 
         # 動画プレビュー
         st.video(str(video_path))
@@ -702,7 +1340,7 @@ if st.session_state.generated_video:
         # ダウンロードボタン
         with open(video_path, "rb") as vf:
             st.download_button(
-                label="動画をダウンロード",
+                label="📥 動画をダウンロード",
                 data=vf.read(),
                 file_name=video_path.name,
                 mime="video/mp4",

@@ -27,9 +27,12 @@ from generate_video import (
     TTSProvider,
     VoicevoxTTS,
     concatenate_scenes_with_transition,
+    create_scene_from_video,
     get_tts_provider,
+    overlay_narration,
     parse_script,
     resolve_image_path,
+    resolve_video_clip_path,
 )
 
 
@@ -981,6 +984,794 @@ class TestConcatenateScenesWithTransition(unittest.TestCase):
             self.assertIn("offset=2.000", filter_str)
             # 2nd xfade: cumulative = 2.0 + 4.0 = 6.0, offset = 6.0 - 1.0 = 5.0
             self.assertIn("offset=5.000", filter_str)
+
+
+# ---------------------------------------------------------------------------
+# 12. 動画クリップパス解決のテスト
+# ---------------------------------------------------------------------------
+
+class TestResolveVideoClipPath(unittest.TestCase):
+    """resolve_video_clip_path 関数のテスト."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._tmpdir_path = Path(self._tmpdir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_webm_pattern(self):
+        """slide_{N}.webm パターンが検索されること."""
+        clip = self._tmpdir_path / "slide_3.webm"
+        clip.touch()
+        result = resolve_video_clip_path(self._tmpdir_path, 3)
+        self.assertEqual(result, clip)
+
+    def test_mp4_pattern(self):
+        """slide_{N}.mp4 パターンが検索されること."""
+        clip = self._tmpdir_path / "slide_5.mp4"
+        clip.touch()
+        result = resolve_video_clip_path(self._tmpdir_path, 5)
+        self.assertEqual(result, clip)
+
+    def test_webm_takes_priority_over_mp4(self):
+        """slide_{N}.webm が slide_{N}.mp4 より優先されること."""
+        webm = self._tmpdir_path / "slide_2.webm"
+        mp4 = self._tmpdir_path / "slide_2.mp4"
+        webm.touch()
+        mp4.touch()
+        result = resolve_video_clip_path(self._tmpdir_path, 2)
+        self.assertEqual(result, webm)
+
+    def test_not_found_raises_file_not_found_error(self):
+        """クリップが見つからない場合にFileNotFoundErrorが発生すること."""
+        with self.assertRaises(FileNotFoundError) as ctx:
+            resolve_video_clip_path(self._tmpdir_path, 99)
+        error_msg = str(ctx.exception)
+        self.assertIn("99", error_msg)
+
+    def test_error_message_contains_candidate_paths(self):
+        """エラーメッセージに全候補パスが含まれること."""
+        with self.assertRaises(FileNotFoundError) as ctx:
+            resolve_video_clip_path(self._tmpdir_path, 42)
+        error_msg = str(ctx.exception)
+        self.assertIn("slide_42.webm", error_msg)
+        self.assertIn("slide_42.mp4", error_msg)
+
+
+# ---------------------------------------------------------------------------
+# 13. create_scene_from_video のテスト
+# ---------------------------------------------------------------------------
+
+class TestCreateSceneFromVideo(unittest.TestCase):
+    """create_scene_from_video のFFmpegコマンド検証テスト."""
+
+    def setUp(self):
+        self._tmp_files: list[Path] = []
+
+    def tearDown(self):
+        for p in self._tmp_files:
+            p.unlink(missing_ok=True)
+
+    def _make_config(self) -> Config:
+        path = _make_config_file(_FULL_CONFIG_DATA)
+        self._tmp_files.append(path)
+        return Config.from_json(path)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration")
+    def test_stream_loop_always_used(self, mock_duration, mock_ffmpeg):
+        """動画入力に -stream_loop -1 が常に使われること."""
+        mock_duration.return_value = 5.0
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "slide_1.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "scene_01.mp4"
+            video.touch()
+            audio.touch()
+
+            create_scene_from_video(video, audio, output, config)
+
+            mock_ffmpeg.assert_called_once()
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            self.assertIn("-stream_loop", ffmpeg_args)
+            loop_idx = ffmpeg_args.index("-stream_loop")
+            self.assertEqual(ffmpeg_args[loop_idx + 1], "-1")
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration")
+    def test_no_tpad_no_overlay(self, mock_duration, mock_ffmpeg):
+        """tpadやoverlayが使われないこと（stream_loop方式）."""
+        mock_duration.return_value = 5.0
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "slide_1.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "scene_01.mp4"
+            video.touch()
+            audio.touch()
+
+            create_scene_from_video(video, audio, output, config)
+
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            ffmpeg_str = " ".join(str(a) for a in ffmpeg_args)
+            self.assertNotIn("tpad", ffmpeg_str)
+            self.assertNotIn("overlay", ffmpeg_str)
+            self.assertNotIn("-filter_complex", ffmpeg_args)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration")
+    def test_video_copy_no_reencode(self, mock_duration, mock_ffmpeg):
+        """映像は -c:v copy でストリームコピーされること（再エンコードなし）."""
+        mock_duration.return_value = 5.0
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "slide_1.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "scene_01.mp4"
+            video.touch()
+            audio.touch()
+
+            create_scene_from_video(video, audio, output, config)
+
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            # -c:v copy が含まれること
+            cv_idx = ffmpeg_args.index("-c:v")
+            self.assertEqual(ffmpeg_args[cv_idx + 1], "copy")
+            # 再エンコード関連オプションが含まれないこと
+            self.assertNotIn("-crf", ffmpeg_args)
+            self.assertNotIn("-preset", ffmpeg_args)
+            self.assertNotIn("libx264", ffmpeg_args)
+            self.assertNotIn("-vf", ffmpeg_args)
+            self.assertNotIn("-pix_fmt", ffmpeg_args)
+            self.assertNotIn("stillimage", ffmpeg_args)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration")
+    def test_ffmpeg_args_contain_audio_options(self, mock_duration, mock_ffmpeg):
+        """FFmpegコマンドに音声オプション(movflags, ac, ar)が含まれること."""
+        mock_duration.return_value = 5.0
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "slide_1.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "scene_01.mp4"
+            video.touch()
+            audio.touch()
+
+            create_scene_from_video(video, audio, output, config)
+
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            self.assertIn("-movflags", ffmpeg_args)
+            self.assertIn("+faststart", ffmpeg_args)
+            self.assertIn("-ac", ffmpeg_args)
+            self.assertIn("-ar", ffmpeg_args)
+            self.assertIn("-c:a", ffmpeg_args)
+            self.assertIn("aac", ffmpeg_args)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration")
+    def test_single_ffmpeg_call(self, mock_duration, mock_ffmpeg):
+        """FFmpegが1回だけ呼ばれること（一時ファイル不要）."""
+        mock_duration.return_value = 5.0
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "slide_1.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "scene_01.mp4"
+            video.touch()
+            audio.touch()
+
+            create_scene_from_video(video, audio, output, config)
+
+            mock_ffmpeg.assert_called_once()
+            # 一時ファイルが残っていないこと
+            tmp_files = list(Path(tmpdir).glob("_lastframe_*"))
+            self.assertEqual(tmp_files, [])
+
+
+# ---------------------------------------------------------------------------
+# 14. process_slides ビデオモードのテスト
+# ---------------------------------------------------------------------------
+
+class TestProcessSlidesVideoMode(unittest.TestCase):
+    """process_slides の video_clips_dir 指定時の分岐テスト."""
+
+    def setUp(self):
+        self._tmp_files: list[Path] = []
+
+    def tearDown(self):
+        for p in self._tmp_files:
+            p.unlink(missing_ok=True)
+
+    def _make_config(self, tmpdir: str) -> Config:
+        data = {
+            **_FULL_CONFIG_DATA,
+            "paths": {
+                "images_dir": tmpdir,
+                "script_file": "input/script.md",
+                "output_dir": tmpdir,
+            },
+        }
+        path = _make_config_file(data, directory=tmpdir)
+        self._tmp_files.append(path)
+        return Config.from_json(path)
+
+    @patch("generate_video.concatenate_scenes_with_transition")
+    @patch("generate_video.create_scene_from_video")
+    @patch("generate_video.get_audio_duration", return_value=3.0)
+    @patch("generate_video.generate_silence")
+    def test_video_mode_uses_create_scene_from_video(
+        self, mock_silence, mock_audio_dur, mock_create_video, mock_concat
+    ):
+        """video_clips_dir指定時にcreate_scene_from_videoが呼ばれること."""
+        entries = [
+            SlideEntry(number=1, title="タイトル", text="", is_silent=True),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            clips_dir = Path(tmpdir) / "clips"
+            clips_dir.mkdir()
+            (clips_dir / "slide_1.webm").touch()
+
+            # モックが呼ばれた時にシーンファイルを作成する
+            def _touch_scene(*args, **kwargs):
+                scene_path = args[2]  # 3rd positional arg = output_path
+                scene_path.parent.mkdir(parents=True, exist_ok=True)
+                scene_path.touch()
+
+            mock_create_video.side_effect = _touch_scene
+
+            gv.process_slides(entries, config, video_clips_dir=clips_dir)
+
+            mock_create_video.assert_called_once()
+
+    @patch("generate_video.concatenate_scenes_with_transition")
+    @patch("generate_video.create_scene")
+    @patch("generate_video.get_audio_duration", return_value=3.0)
+    @patch("generate_video.generate_silence")
+    def test_image_mode_uses_create_scene(
+        self, mock_silence, mock_audio_dur, mock_create_scene, mock_concat
+    ):
+        """video_clips_dir未指定時にcreate_scene（静止画版）が呼ばれること."""
+        entries = [
+            SlideEntry(number=1, title="タイトル", text="", is_silent=True),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            (Path(tmpdir) / "slide_1.png").touch()
+
+            def _touch_scene(*args, **kwargs):
+                scene_path = args[2]
+                scene_path.parent.mkdir(parents=True, exist_ok=True)
+                scene_path.touch()
+
+            mock_create_scene.side_effect = _touch_scene
+
+            gv.process_slides(entries, config)
+
+            mock_create_scene.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 15. overlay_narration のテスト
+# ---------------------------------------------------------------------------
+
+class TestOverlayNarration(unittest.TestCase):
+    """overlay_narration のFFmpegコマンド検証テスト."""
+
+    def setUp(self):
+        self._tmp_files: list[Path] = []
+
+    def tearDown(self):
+        for p in self._tmp_files:
+            p.unlink(missing_ok=True)
+
+    def _make_config(self) -> Config:
+        path = _make_config_file(_FULL_CONFIG_DATA)
+        self._tmp_files.append(path)
+        return Config.from_json(path)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration", return_value=5.0)
+    @patch("generate_video.get_video_duration", return_value=60.0)
+    def test_single_audio_overlay(self, mock_vid_dur, mock_aud_dur, mock_ffmpeg):
+        """音声1つのオーバーレイが正しくFFmpegに渡されること."""
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "full.webm"
+            audio = Path(tmpdir) / "slide_02.mp3"
+            output = Path(tmpdir) / "final.mp4"
+            video.touch()
+            audio.touch()
+
+            overlay_narration(video, [(audio, 3.5)], output, config)
+
+            mock_ffmpeg.assert_called_once()
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            filter_str = ffmpeg_args[ffmpeg_args.index("-filter_complex") + 1]
+            # adelayが正しいタイミング（3500ms）で設定されること
+            self.assertIn("adelay=3500|3500", filter_str)
+            # amix=inputs=2（silence bed + 1 audio）
+            self.assertIn("amix=inputs=2", filter_str)
+            # 無音ベッドトラックが含まれること
+            self.assertIn("anullsrc", filter_str)
+            self.assertIn("[silence]", filter_str)
+            # ビデオスケーリングが含まれること
+            self.assertIn("scale=1920:1080", filter_str)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration", return_value=5.0)
+    @patch("generate_video.get_video_duration", return_value=60.0)
+    def test_multiple_audio_overlay(self, mock_vid_dur, mock_aud_dur, mock_ffmpeg):
+        """複数音声のオーバーレイが正しく構築されること."""
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "full.webm"
+            a1 = Path(tmpdir) / "slide_02.mp3"
+            a2 = Path(tmpdir) / "slide_05.mp3"
+            a3 = Path(tmpdir) / "slide_10.mp3"
+            output = Path(tmpdir) / "final.mp4"
+            for f in (video, a1, a2, a3):
+                f.touch()
+
+            overlay_narration(
+                video,
+                [(a1, 0.5), (a2, 10.0), (a3, 25.5)],
+                output,
+                config,
+            )
+
+            mock_ffmpeg.assert_called_once()
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            filter_str = ffmpeg_args[ffmpeg_args.index("-filter_complex") + 1]
+            # 3つのadelayが設定されること
+            self.assertIn("adelay=500|500", filter_str)
+            self.assertIn("adelay=10000|10000", filter_str)
+            self.assertIn("adelay=25500|25500", filter_str)
+            # amix=inputs=4（silence bed + 3 audios）
+            self.assertIn("amix=inputs=4", filter_str)
+            # normalize=0で音量低下防止
+            self.assertIn("normalize=0", filter_str)
+            # 無音ベッドが先頭にあること
+            self.assertIn("[silence][a0][a1][a2]amix", filter_str)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_video_duration", return_value=60.0)
+    def test_no_audio_entries(self, mock_vid_dur, mock_ffmpeg):
+        """音声なしの場合、-anで音声なし出力になること."""
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "full.webm"
+            output = Path(tmpdir) / "final.mp4"
+            video.touch()
+
+            overlay_narration(video, [], output, config)
+
+            mock_ffmpeg.assert_called_once()
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            self.assertIn("-an", ffmpeg_args)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration", return_value=5.0)
+    @patch("generate_video.get_video_duration", return_value=60.0)
+    def test_output_uses_libx264(self, mock_vid_dur, mock_aud_dur, mock_ffmpeg):
+        """出力がlibx264でエンコードされること."""
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "full.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "final.mp4"
+            video.touch()
+            audio.touch()
+
+            overlay_narration(video, [(audio, 0.0)], output, config)
+
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            self.assertIn("libx264", ffmpeg_args)
+            self.assertIn("-pix_fmt", ffmpeg_args)
+            self.assertIn("yuv420p", ffmpeg_args)
+            self.assertIn("-movflags", ffmpeg_args)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration", return_value=15.0)
+    @patch("generate_video.get_video_duration", return_value=30.0)
+    def test_video_extended_when_audio_exceeds(self, mock_vid_dur, mock_aud_dur, mock_ffmpeg):
+        """音声が動画より長い場合、tpadで延長されること."""
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "full.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "final.mp4"
+            video.touch()
+            audio.touch()
+
+            # audio starts at 25.0s, duration 15.0s → ends at 40.5s (+ padding 0.5)
+            # video is 30.0s → needs extension
+            overlay_narration(video, [(audio, 25.0)], output, config)
+
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            filter_str = ffmpeg_args[ffmpeg_args.index("-filter_complex") + 1]
+            # tpadで延長されること
+            self.assertIn("tpad=stop_mode=clone", filter_str)
+
+    @patch("generate_video._run_ffmpeg")
+    @patch("generate_video.get_audio_duration", return_value=5.0)
+    @patch("generate_video.get_video_duration", return_value=60.0)
+    def test_minimal_tpad_when_video_long_enough(self, mock_vid_dur, mock_aud_dur, mock_ffmpeg):
+        """動画が十分長い場合、tpadは安全マージン（1秒）分のみ."""
+        config = self._make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = Path(tmpdir) / "full.webm"
+            audio = Path(tmpdir) / "slide_01.mp3"
+            output = Path(tmpdir) / "final.mp4"
+            video.touch()
+            audio.touch()
+
+            # audio at 3.0s, 5.0s duration → ends at 8.5s. Video is 60s.
+            # required = max(60, 8.5) + 1.0 = 61.0 → extend = 1.0 (safety only)
+            overlay_narration(video, [(audio, 3.0)], output, config)
+
+            ffmpeg_args = mock_ffmpeg.call_args[0][0]
+            filter_str = ffmpeg_args[ffmpeg_args.index("-filter_complex") + 1]
+            # 安全マージン1秒分のtpadのみ
+            self.assertIn("tpad=stop_mode=clone:stop_duration=1.000", filter_str)
+
+
+# ---------------------------------------------------------------------------
+# 16. process_slides フル動画オーバーレイモードのテスト
+# ---------------------------------------------------------------------------
+
+class TestProcessSlidesOverlayMode(unittest.TestCase):
+    """process_slides のフル動画オーバーレイモード分岐テスト."""
+
+    def setUp(self):
+        self._tmp_files: list[Path] = []
+
+    def tearDown(self):
+        for p in self._tmp_files:
+            p.unlink(missing_ok=True)
+
+    def _make_config(self, tmpdir: str) -> Config:
+        data = {
+            **_FULL_CONFIG_DATA,
+            "paths": {
+                "images_dir": tmpdir,
+                "script_file": "input/script.md",
+                "output_dir": tmpdir,
+            },
+        }
+        path = _make_config_file(data, directory=tmpdir)
+        self._tmp_files.append(path)
+        return Config.from_json(path)
+
+    @patch("generate_video.overlay_narration")
+    @patch("generate_video.generate_silence")
+    def test_overlay_mode_calls_overlay_narration(
+        self, mock_silence, mock_overlay
+    ):
+        """full_video_path指定時にoverlay_narrationが呼ばれること."""
+        entries = [
+            SlideEntry(number=1, title="タイトル", text="", is_silent=True),
+            SlideEntry(number=2, title="テスト", text="テキスト", is_silent=False),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            full_video = Path(tmpdir) / "full_presentation.webm"
+            full_video.touch()
+            timestamps = [0.0, 3.5]  # slide1=0.0, slide2=3.5
+
+            # overlay_narrationが呼ばれた時にfinal.mp4を作成
+            def _touch_final(*args, **kwargs):
+                output_path = args[2]  # 3rd positional arg
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.touch()
+
+            mock_overlay.side_effect = _touch_final
+
+            # TTSプロバイダーをモック
+            with patch("generate_video.get_tts_provider") as mock_tts:
+                mock_provider = MagicMock()
+                mock_tts.return_value = mock_provider
+
+                result = gv.process_slides(
+                    entries,
+                    config,
+                    full_video_path=full_video,
+                    slide_timestamps=timestamps,
+                )
+
+            mock_overlay.assert_called_once()
+            # 無音スライドはスキップされ、TTS対象は1つだけ
+            overlay_args = mock_overlay.call_args[0]
+            audio_entries = overlay_args[1]
+            self.assertEqual(len(audio_entries), 1)
+            # スライド2のタイムスタンプ = timestamps[1] = 3.5
+            # 開始時刻 = 3.5 + padding_before(0.5) = 4.0
+            self.assertAlmostEqual(audio_entries[0][1], 4.0)
+
+    @patch("generate_video.get_audio_duration", return_value=5.0)
+    @patch("generate_video.overlay_narration")
+    @patch("generate_video.generate_silence")
+    def test_overlay_mode_uses_slide_number_not_index(
+        self, mock_silence, mock_overlay, mock_audio_dur
+    ):
+        """タイムスタンプ参照にスライド番号が使われること（idx不使用）."""
+        # スライド1,3が無音、スライド2,4にTTSがある場合
+        entries = [
+            SlideEntry(number=1, title="タイトル", text="", is_silent=True),
+            SlideEntry(number=2, title="テスト2", text="テキスト2", is_silent=False),
+            SlideEntry(number=3, title="テスト3", text="", is_silent=True),
+            SlideEntry(number=4, title="テスト4", text="テキスト4", is_silent=False),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            full_video = Path(tmpdir) / "full.webm"
+            full_video.touch()
+            # timestamps[0]=slide1, [1]=slide2, [2]=slide3, [3]=slide4
+            timestamps = [0.0, 5.0, 15.0, 25.0]
+
+            def _touch_final(*args, **kwargs):
+                args[2].parent.mkdir(parents=True, exist_ok=True)
+                args[2].touch()
+
+            mock_overlay.side_effect = _touch_final
+
+            with patch("generate_video.get_tts_provider") as mock_tts:
+                mock_provider = MagicMock()
+                mock_tts.return_value = mock_provider
+
+                gv.process_slides(
+                    entries,
+                    config,
+                    full_video_path=full_video,
+                    slide_timestamps=timestamps,
+                )
+
+            overlay_args = mock_overlay.call_args[0]
+            audio_entries = overlay_args[1]
+            # スライド2とスライド4の2つだけ
+            self.assertEqual(len(audio_entries), 2)
+            # スライド2: timestamps[1] + 0.5 = 5.5
+            self.assertAlmostEqual(audio_entries[0][1], 5.5)
+            # スライド4: timestamps[3] + 0.5 = 25.5
+            self.assertAlmostEqual(audio_entries[1][1], 25.5)
+
+    @patch("generate_video.overlay_narration")
+    def test_overlay_mode_skips_all_silent(self, mock_overlay):
+        """全スライドが無音の場合、空のaudio_entriesでoverlay_narrationが呼ばれること."""
+        entries = [
+            SlideEntry(number=1, title="タイトル", text="", is_silent=True),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            full_video = Path(tmpdir) / "full.webm"
+            full_video.touch()
+
+            def _touch_final(*args, **kwargs):
+                args[2].parent.mkdir(parents=True, exist_ok=True)
+                args[2].touch()
+
+            mock_overlay.side_effect = _touch_final
+
+            with patch("generate_video.get_tts_provider"):
+                gv.process_slides(
+                    entries,
+                    config,
+                    full_video_path=full_video,
+                    slide_timestamps=[0.0],
+                )
+
+            overlay_args = mock_overlay.call_args[0]
+            self.assertEqual(len(overlay_args[1]), 0)
+
+    @patch("generate_video.concatenate_scenes_with_transition")
+    @patch("generate_video.create_scene")
+    @patch("generate_video.get_audio_duration", return_value=3.0)
+    @patch("generate_video.generate_silence")
+    def test_no_full_video_falls_back_to_scene_mode(
+        self, mock_silence, mock_duration, mock_scene, mock_concat
+    ):
+        """full_video_path未指定時は従来のシーンモードが使われること."""
+        entries = [
+            SlideEntry(number=1, title="タイトル", text="", is_silent=True),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            (Path(tmpdir) / "slide_1.png").touch()
+
+            def _touch_scene(*args, **kwargs):
+                args[2].parent.mkdir(parents=True, exist_ok=True)
+                args[2].touch()
+
+            mock_scene.side_effect = _touch_scene
+
+            gv.process_slides(entries, config)
+
+            mock_scene.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 17. 外部動画ファイルモード（手動タイムスタンプ）のテスト
+# ---------------------------------------------------------------------------
+
+class TestProcessSlidesExternalVideoMode(unittest.TestCase):
+    """外部動画ファイル + 手動タイムスタンプでのオーバーレイモードのテスト."""
+
+    def setUp(self):
+        self._tmp_files: list[Path] = []
+
+    def tearDown(self):
+        for p in self._tmp_files:
+            p.unlink(missing_ok=True)
+
+    def _make_config(self, tmpdir: str) -> Config:
+        data = {
+            **_FULL_CONFIG_DATA,
+            "paths": {
+                "images_dir": tmpdir,
+                "script_file": "input/script.md",
+                "output_dir": tmpdir,
+            },
+        }
+        path = _make_config_file(data, directory=tmpdir)
+        self._tmp_files.append(path)
+        return Config.from_json(path)
+
+    @patch("generate_video.get_audio_duration", return_value=5.0)
+    @patch("generate_video.overlay_narration")
+    def test_external_video_with_manual_timestamps(self, mock_overlay, mock_audio_dur):
+        """外部動画 + 手動タイムスタンプでoverlay_narrationが呼ばれること."""
+        entries = [
+            SlideEntry(number=1, title="タイトル", text="", is_silent=True),
+            SlideEntry(number=2, title="テスト", text="テキスト", is_silent=False),
+            SlideEntry(number=3, title="テスト3", text="テキスト3", is_silent=False),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            # 外部動画ファイル（MP4）
+            ext_video = Path(tmpdir) / "my_video.mp4"
+            ext_video.touch()
+            # 手動タイムスタンプ（均等分割風）
+            timestamps = [0.0, 10.0, 20.0]
+
+            def _touch_final(*args, **kwargs):
+                args[2].parent.mkdir(parents=True, exist_ok=True)
+                args[2].touch()
+
+            mock_overlay.side_effect = _touch_final
+
+            with patch("generate_video.get_tts_provider") as mock_tts:
+                mock_provider = MagicMock()
+                mock_tts.return_value = mock_provider
+
+                result = gv.process_slides(
+                    entries,
+                    config,
+                    full_video_path=ext_video,
+                    slide_timestamps=timestamps,
+                )
+
+            mock_overlay.assert_called_once()
+            overlay_args = mock_overlay.call_args[0]
+            # 動画パスが外部動画ファイルであること
+            self.assertEqual(overlay_args[0], ext_video)
+            # 無音スキップで2つのaudio_entries
+            audio_entries = overlay_args[1]
+            self.assertEqual(len(audio_entries), 2)
+            # スライド2: timestamps[1] + padding_before(0.5) = 10.5
+            self.assertAlmostEqual(audio_entries[0][1], 10.5)
+            # スライド3: timestamps[2] + padding_before(0.5) = 20.5
+            self.assertAlmostEqual(audio_entries[1][1], 20.5)
+
+    @patch("generate_video.overlay_narration")
+    @patch("generate_video.get_audio_duration", return_value=8.0)
+    def test_external_video_overlap_prevention(self, mock_dur, mock_overlay):
+        """外部動画モードで音声重なり防止が動作すること."""
+        entries = [
+            SlideEntry(number=1, title="テスト1", text="テキスト1", is_silent=False),
+            SlideEntry(number=2, title="テスト2", text="テキスト2", is_silent=False),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_config(tmpdir)
+            ext_video = Path(tmpdir) / "video.mov"
+            ext_video.touch()
+            # タイムスタンプが近すぎる（音声8秒なのに5秒間隔）
+            timestamps = [0.0, 5.0]
+
+            def _touch_final(*args, **kwargs):
+                args[2].parent.mkdir(parents=True, exist_ok=True)
+                args[2].touch()
+
+            mock_overlay.side_effect = _touch_final
+
+            with patch("generate_video.get_tts_provider") as mock_tts:
+                mock_provider = MagicMock()
+                mock_tts.return_value = mock_provider
+
+                gv.process_slides(
+                    entries,
+                    config,
+                    full_video_path=ext_video,
+                    slide_timestamps=timestamps,
+                )
+
+            overlay_args = mock_overlay.call_args[0]
+            audio_entries = overlay_args[1]
+            # 重なり防止により、2番目の開始が遅延されていること
+            # slide1: start=0.0+0.5=0.5, end=0.5+8.0+0.5=9.0
+            # slide2: 元は5.0+0.5=5.5 だが 9.0に遅延されるはず
+            self.assertGreaterEqual(audio_entries[1][1], 9.0)
+
+    @patch("generate_video.overlay_narration")
+    def test_various_video_formats_accepted(self, mock_overlay):
+        """MP4以外の形式（MOV, AVI, MKV等）でもoverlay_narrationに渡されること."""
+        entries = [
+            SlideEntry(number=1, title="テスト", text="テキスト", is_silent=False),
+        ]
+        for ext in [".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv"]:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config = self._make_config(tmpdir)
+                video = Path(tmpdir) / f"test_video{ext}"
+                video.touch()
+
+                def _touch_final(*args, **kwargs):
+                    args[2].parent.mkdir(parents=True, exist_ok=True)
+                    args[2].touch()
+
+                mock_overlay.side_effect = _touch_final
+
+                with patch("generate_video.get_tts_provider") as mock_tts:
+                    mock_provider = MagicMock()
+                    mock_tts.return_value = mock_provider
+
+                    result = gv.process_slides(
+                        entries,
+                        config,
+                        full_video_path=video,
+                        slide_timestamps=[0.0],
+                    )
+
+                self.assertIsNotNone(result, f"Failed for format: {ext}")
+                mock_overlay.assert_called()
+                # 渡されたvideoパスが正しいこと
+                call_video = mock_overlay.call_args[0][0]
+                self.assertEqual(call_video.suffix, ext)
+                mock_overlay.reset_mock()
+
+
+# ---------------------------------------------------------------------------
+# 18. get_video_duration のテスト
+# ---------------------------------------------------------------------------
+
+class TestGetVideoDuration(unittest.TestCase):
+    """get_video_duration 関数のテスト."""
+
+    @patch("subprocess.run")
+    def test_returns_float_duration(self, mock_run):
+        """正常な出力からfloat値が返ること."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="123.456\n",
+            stderr="",
+        )
+        from generate_video import get_video_duration
+        result = get_video_duration(Path("/tmp/video.mp4"))
+        self.assertAlmostEqual(result, 123.456)
+
+    @patch("subprocess.run")
+    def test_raises_on_ffprobe_failure(self, mock_run):
+        """ffprobe失敗時にRuntimeErrorが発生すること."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="error",
+        )
+        from generate_video import get_video_duration
+        with self.assertRaises(RuntimeError):
+            get_video_duration(Path("/tmp/nonexistent.mp4"))
 
 
 if __name__ == "__main__":
