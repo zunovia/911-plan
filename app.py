@@ -889,6 +889,7 @@ with st.expander("TTS設定（音声合成）"):
         "TTSプロバイダー",
         ["Google Cloud TTS", "VOICEVOX"],
         horizontal=True,
+        key="tts_provider_radio",
     )
 
     provider_key = "google" if tts_provider == "Google Cloud TTS" else "voicevox"
@@ -943,18 +944,33 @@ with st.expander("TTS設定（音声合成）"):
 
     tts_options: dict = {}
     if provider_key == "voicevox":
-        vv_base_url = st.text_input(
+        # 永続ストア（widget keyとは別にしてStreamlitの自動削除を回避）
+        if "_vv_base_url" not in st.session_state:
+            st.session_state["_vv_base_url"] = "http://localhost:50021"
+        if "_vv_speaker_id" not in st.session_state:
+            st.session_state["_vv_speaker_id"] = 1
+
+        def _on_base_url_change():
+            st.session_state["_vv_base_url"] = st.session_state["vv_base_url_widget"]
+
+        def _on_speaker_change():
+            st.session_state["_vv_speaker_id"] = int(st.session_state["vv_speaker_id_widget"])
+
+        st.text_input(
             "VOICEVOX Base URL",
-            value="http://localhost:50021",
+            value=st.session_state["_vv_base_url"],
+            key="vv_base_url_widget",
+            on_change=_on_base_url_change,
         )
-        vv_speaker = st.number_input(
-            "Speaker ID",
+        st.number_input(
+            "Speaker ID（話者一覧は左サイドバーのページから確認）",
             min_value=0,
-            value=1,
+            value=st.session_state["_vv_speaker_id"],
             step=1,
-            help="0=四国めたん, 1=ずんだもん, 2=春日部つむぎ, etc.",
+            key="vv_speaker_id_widget",
+            on_change=_on_speaker_change,
+            help="0=四国めたん(あまあま), 1=ずんだもん(あまあま), 3=ずんだもん(ノーマル), 14=冥鳴ひまり, etc.",
         )
-        tts_options = {"base_url": vv_base_url, "speaker": int(vv_speaker)}
 
 
 # ---------------------------------------------------------------------------
@@ -991,22 +1007,48 @@ with st.expander("動画設定（解像度・トランジション）"):
 # ---------------------------------------------------------------------------
 
 with st.expander("BGM設定（バックグラウンドミュージック）"):
-    bgm_enabled = st.checkbox("BGMを有効にする", value=False)
+    # 永続ストア初期化
+    if "_bgm_enabled" not in st.session_state:
+        st.session_state["_bgm_enabled"] = False
+    if "_bgm_file" not in st.session_state:
+        st.session_state["_bgm_file"] = ""
+    if "_bgm_volume" not in st.session_state:
+        st.session_state["_bgm_volume"] = 0.15
+
+    def _on_bgm_enabled_change():
+        st.session_state["_bgm_enabled"] = st.session_state["bgm_enabled_widget"]
+
+    def _on_bgm_file_change():
+        st.session_state["_bgm_file"] = st.session_state["bgm_file_widget"]
+
+    def _on_bgm_volume_change():
+        st.session_state["_bgm_volume"] = st.session_state["bgm_volume_widget"]
+
+    bgm_enabled = st.checkbox(
+        "BGMを有効にする",
+        value=st.session_state["_bgm_enabled"],
+        key="bgm_enabled_widget",
+        on_change=_on_bgm_enabled_change,
+    )
     bgm_file_value = ""
     bgm_volume = 0.15
 
     if bgm_enabled:
         bgm_file_value = st.text_input(
             "BGMファイルパス",
-            value="",
+            value=st.session_state["_bgm_file"],
+            key="bgm_file_widget",
+            on_change=_on_bgm_file_change,
             help="MP3/WAVファイルのパスを入力",
         )
         bgm_volume = st.slider(
             "BGM音量",
             min_value=0.0,
             max_value=1.0,
-            value=0.15,
+            value=st.session_state["_bgm_volume"],
             step=0.01,
+            key="bgm_volume_widget",
+            on_change=_on_bgm_volume_change,
         )
 
 
@@ -1189,6 +1231,19 @@ if generate_clicked and entries:
             st.error("台本ファイルが指定されていません。")
             st.stop()
 
+    # VOICEVOX設定: 永続ストア(_vv_*)から読み取り（widget keyはStreamlitが削除する場合がある）
+    if provider_key == "voicevox":
+        tts_options = {
+            "base_url": st.session_state.get("_vv_base_url", "http://localhost:50021"),
+            "speaker": int(st.session_state.get("_vv_speaker_id", 1)),
+        }
+    st.info(f"TTS設定: provider={provider_key}, options={tts_options}")
+
+    # BGM設定: 永続ストアから読み取り
+    _bgm_enabled = st.session_state.get("_bgm_enabled", False)
+    _bgm_file = st.session_state.get("_bgm_file", "")
+    _bgm_volume = st.session_state.get("_bgm_volume", 0.15)
+
     # Config構築
     config = build_config(
         tts_provider=provider_key,
@@ -1199,9 +1254,9 @@ if generate_clicked and entries:
         resolution=resolution,
         transition=transition,
         transition_duration=transition_duration,
-        bgm_enabled=bgm_enabled,
-        bgm_file=bgm_file_value,
-        bgm_volume=bgm_volume,
+        bgm_enabled=_bgm_enabled,
+        bgm_file=_bgm_file,
+        bgm_volume=_bgm_volume,
         images_dir=images_dir_value,
         script_file=effective_script_path,
         output_dir=output_dir_value,

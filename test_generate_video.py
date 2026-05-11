@@ -1774,5 +1774,189 @@ class TestGetVideoDuration(unittest.TestCase):
             get_video_duration(Path("/tmp/nonexistent.mp4"))
 
 
+# ---------------------------------------------------------------------------
+# 19. VOICEVOX Speaker ID データフロー追跡テスト
+#     UIから最終的にAPIのURLへ speaker パラメータが正しく伝わるかを検証
+# ---------------------------------------------------------------------------
+
+class TestVoicevoxSpeakerIDDataFlow(unittest.TestCase):
+    """Speaker ID が Config を通じて VOICEVOX API URL に正しく到達することを検証する."""
+
+    def _make_voicevox_config(self, speaker_id: int, tmpdir: str) -> Config:
+        """指定 speaker_id を含む VOICEVOX Config を生成する."""
+        data = {
+            **_FULL_CONFIG_DATA,
+            "tts": {
+                **_FULL_CONFIG_DATA["tts"],
+                "provider": "voicevox",
+                "options": {
+                    "base_url": "http://localhost:50021",
+                    "speaker": speaker_id,
+                },
+            },
+        }
+        path = _make_config_file(data, directory=tmpdir)
+        return Config.from_json(path)
+
+    def _make_mock_responses(self):
+        """audio_query / synthesis のモックレスポンスペアを返す."""
+        query_response = MagicMock()
+        query_response.read.return_value = json.dumps({
+            "speedScale": 1.0, "pitchScale": 0.0, "accent_phrases": [],
+        }).encode()
+        query_response.__enter__ = MagicMock(return_value=query_response)
+        query_response.__exit__ = MagicMock(return_value=False)
+
+        synth_response = MagicMock()
+        synth_response.read.return_value = b"RIFF" + b"\x00" * 100
+        synth_response.__enter__ = MagicMock(return_value=synth_response)
+        synth_response.__exit__ = MagicMock(return_value=False)
+        return query_response, synth_response
+
+    @patch("urllib.request.urlopen")
+    @patch("generate_video._run_ffmpeg")
+    def test_speaker_id_14_reaches_api_url(self, mock_ffmpeg, mock_urlopen):
+        """Speaker ID 14 が audio_query および synthesis URL に含まれること."""
+        query_response, synth_response = self._make_mock_responses()
+        captured_requests = []
+
+        def capture(req):
+            captured_requests.append(req)
+            return query_response if len(captured_requests) == 1 else synth_response
+
+        mock_urlopen.side_effect = capture
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_voicevox_config(speaker_id=14, tmpdir=tmpdir)
+            output_path = Path(tmpdir) / "test.mp3"
+
+            # Config に speaker=14 が格納されていること
+            self.assertEqual(config.tts_options["speaker"], 14)
+
+            VoicevoxTTS().synthesize("テスト音声", output_path, config)
+
+            # audio_query URL に ?speaker=14 が含まれること
+            query_url = captured_requests[0].full_url
+            self.assertIn("speaker=14", query_url,
+                          f"audio_query URL に speaker=14 が含まれていない: {query_url}")
+
+            # synthesis URL に ?speaker=14 が含まれること
+            synth_url = captured_requests[1].full_url
+            self.assertIn("speaker=14", synth_url,
+                          f"synthesis URL に speaker=14 が含まれていない: {synth_url}")
+
+    @patch("urllib.request.urlopen")
+    @patch("generate_video._run_ffmpeg")
+    def test_speaker_id_1_does_not_bleed_into_id_14(self, mock_ffmpeg, mock_urlopen):
+        """デフォルト値 speaker=1 が speaker=14 設定時に使われないこと (バグ再現テスト)."""
+        query_response, synth_response = self._make_mock_responses()
+        captured_requests = []
+
+        def capture(req):
+            captured_requests.append(req)
+            return query_response if len(captured_requests) == 1 else synth_response
+
+        mock_urlopen.side_effect = capture
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._make_voicevox_config(speaker_id=14, tmpdir=tmpdir)
+            output_path = Path(tmpdir) / "test.mp3"
+
+            VoicevoxTTS().synthesize("テスト", output_path, config)
+
+            query_url = captured_requests[0].full_url
+            synth_url = captured_requests[1].full_url
+
+            # speaker=14 が使われていること（数値完全一致で確認）
+            import urllib.parse as _urlparse
+            query_params = dict(_urlparse.parse_qsl(_urlparse.urlparse(query_url).query))
+            synth_params = dict(_urlparse.parse_qsl(_urlparse.urlparse(synth_url).query))
+
+            self.assertEqual(query_params.get("speaker"), "14",
+                             f"audio_query の speaker パラメータが 14 ではない: {query_params}")
+            self.assertEqual(synth_params.get("speaker"), "14",
+                             f"synthesis の speaker パラメータが 14 ではない: {synth_params}")
+
+    @patch("urllib.request.urlopen")
+    @patch("generate_video._run_ffmpeg")
+    def test_speaker_id_preserved_through_config_from_json(self, mock_ffmpeg, mock_urlopen):
+        """Config.from_json 経由でも speaker ID が正しく保持されること."""
+        query_response, synth_response = self._make_mock_responses()
+        captured_requests = []
+
+        def capture(req):
+            captured_requests.append(req)
+            return query_response if len(captured_requests) == 1 else synth_response
+
+        mock_urlopen.side_effect = capture
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # config.json を直接書いて from_json でロード（UI経由を模倣）
+            config_data = {
+                "tts": {
+                    "provider": "voicevox",
+                    "language": "ja-JP",
+                    "voice": "voicevox",
+                    "speaking_rate": 0.9,
+                    "pitch": 0.0,
+                    "options": {
+                        "base_url": "http://localhost:50021",
+                        "speaker": 14,
+                    },
+                },
+                "video": _FULL_CONFIG_DATA["video"],
+                "bgm": _FULL_CONFIG_DATA["bgm"],
+                "paths": {
+                    "images_dir": tmpdir,
+                    "script_file": "input/script.md",
+                    "output_dir": tmpdir,
+                },
+            }
+            config_path = _make_config_file(config_data, directory=tmpdir)
+            config = Config.from_json(config_path)
+
+            # from_json 後の tts_options に speaker=14 が保持されていること
+            self.assertEqual(config.tts_options.get("speaker"), 14)
+
+            output_path = Path(tmpdir) / "test.mp3"
+            VoicevoxTTS().synthesize("テスト", output_path, config)
+
+            query_url = captured_requests[0].full_url
+            self.assertIn("speaker=14", query_url)
+
+    @patch("urllib.request.urlopen")
+    @patch("generate_video._run_ffmpeg")
+    def test_default_speaker_fallback_when_no_option(self, mock_ffmpeg, mock_urlopen):
+        """tts_options に speaker がない場合、デフォルト値 1 が使われること."""
+        query_response, synth_response = self._make_mock_responses()
+        captured_requests = []
+
+        def capture(req):
+            captured_requests.append(req)
+            return query_response if len(captured_requests) == 1 else synth_response
+
+        mock_urlopen.side_effect = capture
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # speaker キーなしの options
+            config_data = {
+                **_FULL_CONFIG_DATA,
+                "tts": {
+                    **_FULL_CONFIG_DATA["tts"],
+                    "provider": "voicevox",
+                    "options": {},  # speaker なし
+                },
+            }
+            config_path = _make_config_file(config_data, directory=tmpdir)
+            config = Config.from_json(config_path)
+            output_path = Path(tmpdir) / "test.mp3"
+
+            VoicevoxTTS().synthesize("テスト", output_path, config)
+
+            query_url = captured_requests[0].full_url
+            # デフォルト値 1 が使われること
+            self.assertIn("speaker=1", query_url)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

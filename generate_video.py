@@ -268,6 +268,7 @@ class VoicevoxTTS(TTSProvider):
 
         base_url = config.tts_options.get("base_url", "http://localhost:50021")
         speaker = config.tts_options.get("speaker", 1)
+        log.info("  VOICEVOX: speaker=%d, base_url=%s, tts_options=%s", speaker, base_url, config.tts_options)
 
         # 1. audio_query: テキストからクエリJSONを取得
         query_url = (
@@ -659,8 +660,12 @@ def mix_bgm(video_path: Path, config: Config) -> Path:
     BGMは動画の長さに合わせてループし、指定音量で合成する。
     元の動画を _no_bgm サフィックス付きで退避し、同じパスにBGM付き動画を出力する。
     """
-    # config.jsonのあるディレクトリからの相対パスで解決
-    bgm_file = (config.output_dir.parent / config.bgm.file).resolve()
+    # BGMファイルパス解決（絶対パスならそのまま、相対パスならプロジェクトルートから）
+    bgm_path = Path(config.bgm.file)
+    if bgm_path.is_absolute():
+        bgm_file = bgm_path.resolve()
+    else:
+        bgm_file = (config.output_dir.parent / config.bgm.file).resolve()
     if not bgm_file.exists():
         log.warning("BGMファイルが見つかりません: %s (BGMなしで続行)", bgm_file)
         return video_path
@@ -989,10 +994,6 @@ def process_slides(
 
     # --- フル動画オーバーレイモード ---
     if full_video_path is not None and slide_timestamps is not None:
-        audio_dir = config.output_dir / "audio"
-        audio_dir.mkdir(parents=True, exist_ok=True)
-
-        tts = get_tts_provider(config.tts_provider)
         audio_entries: list[tuple[Path, float]] = []
 
         for idx, entry in enumerate(entries):
